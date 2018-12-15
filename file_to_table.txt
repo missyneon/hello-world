@@ -1,0 +1,2101 @@
+USE [MetalAdmin]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF EXISTS (select * from dbo.sysobjects where id = object_id(N'[dbo].[usp_METAL1_FileToStage1MAIN_Stephtest]') and OBJECTPROPERTY(id, N'IsProcedure') = 1)
+DROP PROCEDURE [dbo].[usp_METAL1_FileToStage1MAIN_StephTest]
+GO
+
+
+ALTER PROCEDURE [dbo].[usp_METAL1_FileToStage1MAIN]
+	  @DebugFlag INT = 0	-- Don't execute, dispaly SQL syntax 1=Yes|0=No
+	, @AuditFlag INT = 0	-- Update Statistics 1=Yes|0=No
+	, @StepNumber INT = 0
+	, @ProcessorID INT = 0	--PRC
+	, @DestinationDB NVARCHAR(MAX) = ''	--Database
+	, @DestinationTable	NVARCHAR(MAX) = ''	--hDRTable
+	, @FileName	NVARCHAR(MAX) = ''
+	, @ControlID BIGINT = 0
+	, @FileLocation	NVARCHAR(MAX) = ''
+	, @CleanFlag INT = 0
+	, @TotalFileRows BIGINT = 0	-- passed back from clean script
+	, @HeaderRowNumber BIGINT = 1
+	, @StageID INT = 1
+	, @RemoveFooter VARCHAR(MAX) = ''
+	, @RowDelimiter NVARCHAR(5) = '0x0a'	-- hex for new line feed
+	, @ClientParentID BIGINT = 0
+	, @ProviderID BIGINT = 0
+	, @RowsToSkip BIGINT = 0
+	, @SheetName NVARCHAR(MAX) = ''
+	, @Extension NVARCHAR(5) = ''
+	, @GenericStaging INT = 0
+    , @TableDateColumn VARCHAR(100) = '' OUTPUT
+    , @TableDateColumnFlag INT = 0 OUTPUT
+    
+                                                
+AS
+ 
+BEGIN TRY
+
+--------------------------------------------------------------------------------------------------
+--||Declare Functional variables||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+DECLARE 
+	  @True BIT = 1
+	, @False BIT = 0
+	, @Zero BIT = 0
+	, @EmptyString VARCHAR(10) = ''
+
+DECLARE
+	  @SQL NVARCHAR(MAX)
+	, @HeaderSourceMetaID INT 
+    , @Stage1DestinationMetaID INT
+	, @SQLStaging NVARCHAR(MAX)
+	, @HeaderColumnName VARCHAR(MAX)
+	, @HeaderColumnDataType VARCHAR(MAX)
+	, @FullFile NVARCHAR(MAX)
+	, @HdrckFile VARCHAR(MAX)
+	, @FullDestinaion VARCHAR(MAX)
+	, @TrueFlex INT = @False
+	, @F1Col VARCHAR(MAX) = @EmptyString
+	, @isThereStage2 INT = @False
+	, @specialCode INT = @Zero
+	, @DestinationServer1 NVARCHAR(MAX) = @EmptyString
+	, @DestinationServer2 NVARCHAR(MAX) = @EmptyString
+	, @DestinationDB2 NVARCHAR(MAX) = @EmptyString
+	, @DestinationTable2 NVARCHAR(MAX) = @EmptyString
+	, @GenericAdvertiserInFile BIT = @False
+	, @DimensionTable BIT = @False
+	, @Zip NVARCHAR(10) = 'zip'
+	, @Csv NVARCHAR(10) = 'csv'
+	, @Gz NVARCHAR(10) = 'gz'
+	, @StoDMap BIT = @False
+	, @TempMapTable NVARCHAR(MAX) = @EmptyString
+	, @Stage1ID INT = 1
+	, @Stage2ID INT = 2
+	, @SQLDebug VARCHAR(MAX) = @EmptyString
+	, @NewFieldsExist BIT = @False
+	, @CPID75_Active BIT = @False
+	, @NumberOfNewFields INT = @Zero
+	, @ErrorString VARCHAR(MAX) = @EmptyString
+	, @NewFieldName VARCHAR(MAX) = @EmptyString	
+	, @headerCount INT = @Zero -- headers in the file
+	, @MetaFileColumnCount INT = @Zero
+	, @LoopCount INT = 1
+	, @TotalMetaFileRequired INT = @Zero
+	, @TotalFileHeaderRequired INT = @Zero
+	, @varTotalFileHeaderRequired INT = @Zero
+	, @varHeaderColumnName NVARCHAR(MAX) = @EmptyString
+	, @varHeaderColumnDataType NVARCHAR(MAX) = @EmptyString
+	, @SQLInternal NVARCHAR(MAX) = @EmptyString
+	, @varSql NVARCHAR(MAX) = @EmptyString
+	, @varSql2 NVARCHAR(MAX) = @EmptyString
+	, @varSqlInternal NVARCHAR(MAX) = @EmptyString
+	, @sprocName VARCHAR(MAX) = @EmptyString
+	, @executeFlag INT = @True
+	, @AssignedAdvertiserID BIGINT = @Zero
+	, @preProcessSPID INT = @Zero
+	, @specialFunction VARCHAR(MAX) = @EmptyString
+	, @spFunction VARCHAR(MAX) = @EmptyString
+	, @preProcessSP VARCHAR(MAX) = @EmptyString
+	, @columnCount BIGINT = @Zero
+	, @TotalStageColumns BIGINT = @Zero
+	, @CPIDloopcount BIGINT = @Zero
+	, @newCPID BIGINT = @Zero
+	, @CPIDmaxcnt BIGINT = @Zero
+	, @SQLCreate NVARCHAR(MAX) = @EmptyString
+	, @SQLInsert NVARCHAR(MAX) = @EmptyString
+	, @SQLSelect NVARCHAR(MAX) = @EmptyString
+	, @SQLInsertColLen BIGINT = @Zero
+	, @SQLCreateColLen BIGINT = @Zero
+	, @SQLSelectColLen BIGINT = @Zero
+	, @CreateCols NVARCHAR(MAX)
+	, @InsertCols NVARCHAR(MAX) = @EmptyString
+	, @SelectCols NVARCHAR(MAX) = @EmptyString
+	, @SQLColumns NVARCHAR(MAX) = @EmptyString
+	, @TempCPIDTable VARCHAR(MAX) = @EmptyString
+	, @TempCPIDAdvertisersTable VARCHAR(MAX) = @EmptyString
+	, @DefaultCPID INT = 75
+	, @NoAdvertiserDB VARCHAR(MAX) = @EmptyString
+	, @StagingFlag BIT = @False
+	, @StagingFlag75 BIT = @False
+    --new fileExtension parameter added by SM
+	, @ActualFileExtension NVARCHAR(MAX) = @EmptyString
+	, @GenericClientDB NVARCHAR(MAX) = @EmptyString
+	, @OriginalDestinationDB NVARCHAR(MAX) = @EmptyString
+    --, @TableDateColumn varchar(100)
+    --, @TableDateColumnFlag BIT;
+	 
+--------------------------------------------------------------------------------------------------
+--||Set some variables||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+SET @GenericClientDB = 'MetalAdmin'
+SET @DestinationDB = CASE WHEN @GenericStaging = @True THEN 'ClientDB_Generic' ELSE @DestinationDB END
+SET @OriginalDestinationDB = @DestinationDB
+SET @FullDestinaion = @DestinationDB + '.dbo.' + @DestinationTable
+SET @HdrckFile = @DestinationTable + 'hdrck'
+
+SET @FullFile = @FileLocation + @FileName
+--set @ActualFileExtension (added by SM) to look for file extension from end of filename backwards
+SET @ActualFileExtension = REVERSE(LEFT(REVERSE(@FullFile), CHARINDEX('.', REVERSE(@FullFile)) - 1));
+SET @RemoveFooter = ISNULL(@RemoveFooter, @EmptyString)
+SET @HeaderSourceMetaID = 
+	(
+		SELECT 
+			ID
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData]
+		WHERE 
+			SourceProcessorID = @ProcessorID 
+	)
+SET @Stage1DestinationMetaID = 
+	(
+		SELECT 
+			ID
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData]
+		WHERE 
+			DestinationProcessorID = @ProcessorID 
+            AND DestinationStageID = @Stage1ID
+	)
+--Set Temp table names for dynamic SQL
+SET @TempMapTable = '[tempdb].[dbo].[tempMap' + CONVERT(VARCHAR(5), @ProcessorID) + CONVERT(VARCHAR(5), @ClientParentID) + REPLACE(SESSION_USER, '\', @EmptyString) + ']'
+SET @TempCPIDTable = '[tempdb].[dbo].[tempCPID' + CONVERT(VARCHAR(5), @ProcessorID) + CONVERT(VARCHAR(5), @ClientParentID) + '_' + REPLACE(SESSION_USER, '\', @EmptyString) + ']'
+SET @TempCPIDAdvertisersTable = '[tempdb].[dbo].[tempCPIDAdvertisers' + CONVERT(VARCHAR(5), @ProcessorID) + CONVERT(VARCHAR(5), @ClientParentID) + '_' + REPLACE(SESSION_USER, '\', @EmptyString) + ']'
+
+IF @CleanFlag = @True
+	BEGIN
+		SET @FullFile =
+			CASE 
+				WHEN @ActualFileExtension = @Zip
+				THEN STUFF(@FullFile, LEN(@FullFile) - 3, 4, '.' + @Csv)        
+         
+				WHEN @ActualFileExtension = @Gz
+				THEN STUFF(@FullFile, LEN(@FullFile) - 2, 3, @EmptyString)
+         
+				ELSE @FullFile
+			END + '_clean';    
+	END
+
+IF @DebugFlag = @True
+	BEGIN
+		PRINT @FullFile
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Refresh Temp Tables IF they Exist|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @SQL = 
+	'
+		USE [' + @DestinationDB + '] 
+
+		IF OBJECT_ID(''' + @TempMapTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempMapTable + '
+
+		IF OBJECT_ID(''' + @TempCPIDTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempCPIDTable + '
+
+		IF OBJECT_ID(''' + @TempCPIDAdvertisersTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempCPIDAdvertisersTable + '
+			
+	'
+
+EXEC (@SQL)
+
+--------------------------------------------------------------------------------------------------
+--||Setup the _bulk insert table||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @SQL =
+	'
+		USE [' + @DestinationDB + ']
+
+	' 
+	+ CASE
+		WHEN @Extension = @Csv
+		THEN
+			'
+				IF OBJECT_ID(''' + @HdrckFile + '_bulk'', ''U'') IS NOT NULL
+					DROP TABLE [dbo].[' + @HdrckFile + '_bulk]
+
+				CREATE TABLE [dbo].[' + @HdrckFile + '_bulk]
+					(
+						  [RowId] [BIGINT] IDENTITY(1,1) NOT NULL
+						, [F1] [VARCHAR](MAX) NULL
+					) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+			
+				IF EXISTS
+					(
+						SELECT 
+							* 
+						FROM 
+							[INFORMATION_SCHEMA].[COLUMNS]
+						WHERE 
+							TABLE_NAME = ''vw' + @HdrckFile + '_bulk''
+					)
+						BEGIN TRY
+							DROP VIEW [dbo].[vw' + @HdrckFile + '_bulk]
+						END TRY
+	
+						BEGIN CATCH
+							SELECT -1
+						END CATCH
+
+				EXEC
+					(
+						''CREATE VIEW 
+							[dbo].[vw' + @HdrckFile + '_bulk]
+							AS
+								SELECT 
+									F1
+								FROM 
+									[dbo].[' + @HdrckFile + '_bulk]''
+					)	
+			'
+
+		ELSE
+			'
+				IF OBJECT_ID(''' + @HdrckFile + '_bulk'', ''U'') IS NOT NULL
+					DROP TABLE [dbo].[' + @HdrckFile + '_bulk]
+			'
+	  END
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Drop _bulk SQL: ' + @Extension
+			, @SQL
+	END
+
+EXEC(@SQL)
+
+--------------------------------------------------------------------------------------------------
+--||Bulk Insert the header into the 1st column to be split out||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @SQL =
+	'
+		USE [' + @DestinationDB + '] 
+	
+	' 
+	+ CASE
+		WHEN @Extension = @Csv
+		THEN
+			'
+				BULK INSERT 
+					[vw' + @HdrckFile + '_bulk]
+				FROM 
+					''' + @FullFile + '''
+				WITH 
+				(
+					  ROWTERMINATOR= ''' + @RowDelimiter + '''
+					, FIRSTROW = ' + CONVERT(VARCHAR(5), @HeaderRowNumber) + '
+					, LASTROW = ' + CONVERT(VARCHAR(5), @HeaderRowNumber) + '
+					, MAXERRORS = 10
+                    , CODEPAGE = ''65001''
+				)
+			'
+
+		ELSE
+			'
+				SELECT TOP 1 
+					*  
+				INTO 
+					[' + @DestinationDB + '].[dbo].[' + @HdrckFile + '_bulk] 
+				FROM 
+					OPENROWSET
+					(
+						  ''Microsoft.ACE.OLEDB.12.0''
+						, ''Excel 12.0 Xml;HDR=NO;IMEX=1;Database=' + @FullFile + '''
+						, ''SELECT * FROM [' + @SheetName + ']''
+					) a 
+				WHERE 
+					a.[F1] IS NOT NULL
+			'
+	END
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Insert Into _bulk SQL: ' + @Extension
+			, @SQL
+	END
+
+EXEC(@SQL)		
+
+IF @DebugFlag = @True
+	BEGIN
+		SET @SQLDebug = 
+			'
+				SELECT 
+					* 
+				FROM 
+					[' + @DestinationDB + '].[dbo].[' + @HdrckFile + '_bulk]
+			'
+
+		EXEC (@SQLDebug)
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Get the total number of headers|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+/*
+CSV header Count used to do this
+
+	SELECT @headerCnt= (LEN(F1)-LEN(REPLACE(F1,'','','''')))+1 
+	FROM '+@DestinationDB+'.dbo.vw'+@HdrckFile+'_bulk'
+
+This returns a bunch of null records that breaks the error handling and shifts columns. 
+LEN does not count spaces, and messes up the math.
+*/
+
+SET @SQL =
+	CASE
+		WHEN @Extension = @CSV
+		THEN	
+			'
+				SELECT 
+					@headerCnt = COUNT(*)
+				FROM
+					[' + @GenericClientDB + '].[dbo].[fnStringSplit]
+					(
+						(
+							SELECT
+								[F1]
+							FROM
+								[' + @DestinationDB + '].[dbo].[vw' + @HdrckFile + '_bulk]
+						)
+						, '',''
+					)
+					
+			'
+
+		ELSE
+			'
+				SELECT 
+					@headerCnt = COUNT(*)  
+				FROM 
+					[' + @DestinationDB + '].[INFORMATION_SCHEMA].[COLUMNS]  
+				WHERE 
+					TABLE_NAME = ''' + @HdrckFile + '_bulk''
+			'
+
+	END
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Header Count SQL: ' + @Extension
+			, @SQL
+	END
+
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@headerCnt INT OUTPUT'
+	, @headerCnt = @headerCount OUTPUT
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Header Count'
+			, @headerCount
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Create the temp table to hold the mapping|||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @SQL = 
+	'
+		USE [' + @DestinationDB + '] 
+		
+		IF OBJECT_ID(''' + @TempMapTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempMapTable + ' 
+
+		CREATE TABLE 
+			' + @TempMapTable + ' 
+			(
+				  ColumnName NVARCHAR(130)
+				, ColumnAlias NVARCHAR(130)
+				, OriginalColumnOrder INT
+				, FileColumnOrder INT
+				, SourceMetaDataID INT
+				, SourceColumnID INT
+				, DestinationMetaDataIDStage1 INT
+				, DestinationStage1ColumnID INT
+				, DestinationColumnNameStage1 NVARCHAR(130)
+				, ColumnDataType NVARCHAR(50)
+				, ColumnSize NVARCHAR(10)
+				, RequiredField BIT
+				, DestinationMetaDataIDStage2 INT
+				, DestinationStage2ColumnID INT
+				, DestinationColumnNameStage2 NVARCHAR(130)
+				, MergeOn BIT
+				, TransformationCode NVARCHAR(200)
+				, TransformationCodeReplace NVARCHAR(500)
+				, GenericStaging BIT
+				, AdvertiserIncluded BIT
+				, DimensionTable BIT
+				, Matched BIT
+			) 
+		'
+		
+EXEC (@SQL)
+
+--------------------------------------------------------------------------------------------------
+--||Insert all the headers from the file in order|||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+WHILE @LoopCount <= @headerCount
+	BEGIN
+		SET @SQL = 
+			'
+				USE [' + @DestinationDB + ']
+			' 
+			+ CASE
+				WHEN @Extension = @Csv
+				THEN 
+					'
+						INSERT INTO
+							' + @TempMapTable + '  
+							(
+								  ColumnName
+								, ColumnAlias
+								, FileColumnOrder
+							)
+						SELECT TOP 1  
+								RTRIM
+								(
+									LTRIM
+									(
+										REPLACE
+										(
+											[' + @GenericClientDB + '].[dbo].[udf_GetSplitString]
+											(
+											  [F1]
+											, '',''
+											, ' + CONVERT(NVARCHAR(3), @LoopCount) + '
+											)
+										, CHAR(10)
+										, ''' + @EmptyString + '''
+										)
+									)
+								)
+							, REPLACE
+								(
+									[' + @GenericClientDB + '].[dbo].[udf_GetSplitString]
+									(
+									  [F1]
+									, '',''
+									, ' + CONVERT(NVARCHAR(3), @LoopCount) + '
+									)
+								, CHAR(10)
+								, ''' + @EmptyString + '''
+								) 
+							, ' + CONVERT(NVARCHAR(3), @LoopCount) + '
+						FROM 
+							[vw' + @HdrckFile + '_bulk]
+					'
+				ELSE
+					'
+						INSERT INTO
+							' + @TempMapTable + '  
+							(
+								  ColumnName
+								, ColumnAlias
+								, FileColumnOrder
+							)
+						SELECT 
+							  F' + CONVERT(NVARCHAR(3), @LoopCount) + '
+							, F' + CONVERT(NVARCHAR(3), @LoopCount) + '
+							, ' + CONVERT(NVARCHAR(3), @LoopCount) + '
+						FROM 
+							[' + @DestinationDB + '].[dbo].[' + @HdrckFile + '_bulk]
+					'
+			END
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT 
+					  'Insert Headers ' + CONVERT(NVARCHAR(3), @LoopCount) + ' to Temp Map SQL: ' + @Extension
+					, @SQL
+			END
+		
+		EXEC (@SQL)
+
+		SET @LoopCount = @LoopCount + 1
+	END
+
+IF @DebugFlag = @True
+	BEGIN
+		SET @SQLDebug = 
+			'
+				SELECT 
+					* 
+				FROM 
+					' + @TempMapTable + '
+			'
+
+		EXEC (@SQLDebug)
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Get the mapping detail - Stage 0||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+IF 
+(
+	SELECT 
+		COUNT(*) 
+	FROM 
+		[HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] 
+	WHERE 
+			DestinationStageID = @Stage1ID 
+		AND ProcessorID = @ProcessorID
+) > @Zero
+	BEGIN
+		SET @StoDMap = @True
+	END
+ELSE
+	BEGIN
+		SET @StoDMap = @False
+	END
+
+-- update on column name and fileorder (duplicate column headings in the file)
+SET @SQL =
+	'
+		UPDATE 
+			tm
+		SET 
+			  tm.SourceColumnID = sd.ID
+			, tm.SourceMetaDataID = sd.SourceMetaDataID
+			, tm.ColumnAlias = tm.ColumnName ' + CASE
+													WHEN @StoDMap = @True
+													THEN ' + CONVERT(NVARCHAR(3), tm.FileColumnOrder) ' 
+													
+													ELSE '' 
+												 END + '
+			, tm.OriginalColumnOrder = tm.FileColumnOrder
+			, tm.RequiredField = CASE 
+									WHEN sd.FlexColumn = ' + CONVERT(VARCHAR(5),  @True) + ' 
+									THEN ' + CONVERT(VARCHAR(5), @False) + ' 
+												
+									ELSE ' + CONVERT(VARCHAR(5), @True) + '  
+								 END
+			, tm.DimensionTable = CASE 
+									WHEN smd.DataLevel LIKE ''%Match%''  
+									THEN ' + CONVERT(VARCHAR(5), @True) + ' 
+												
+									ELSE ' + CONVERT(VARCHAR(5), @False) + '  
+								  END
+		FROM 
+			' + @TempMapTable + ' tm 
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition] sd 
+					ON [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](sd.ColumnName, ''['', '']'') = [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.ColumnName, ''['', '']'')
+	' + CASE
+			WHEN @StoDMap = @True
+			THEN
+				' 
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] stdm 
+					ON	sd.ID = stdm.SourceColumnID	
+					AND tm.FileColumnOrder = stdm.ColumnNo
+				'
+			ELSE
+				''
+		END +
+	'
+				LEFT JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData] smd 
+					ON sd.SourceMetaDataID = smd.ID
+		WHERE 
+				smd.SourceProcessorID = ' + CONVERT(VARCHAR(5), @ProcessorID) + ' 
+			AND smd.ActiveFlag = ' + CONVERT(VARCHAR(5), @True) + ' 
+			AND sd.ActiveFlag = ' + CONVERT(VARCHAR(5), @True) + '
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Get Mapping Detail SQL: ' + CASE 
+											WHEN @StoDMap = @True 
+											THEN ' SourceToDestMap Stg 1' 
+											
+											ELSE ' Stage 0' 
+										   END
+			, @SQL
+	END
+
+EXEC(@SQL)
+
+IF @DebugFlag = @True
+	BEGIN
+		SET @SQLDebug = 
+			'
+				SELECT 
+					* 
+				FROM 
+					' + @TempMapTable + '
+			'
+
+		EXEC (@SQLDebug)
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Notify If any New Fields exist||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @SQL = 
+	'
+		SELECT 
+			@NumberOfNewFields = COUNT(*) 
+		FROM 
+			' + @TempMapTable + ' tm 
+		WHERE 
+			tm.SourceMetaDataID IS NULL
+	'
+
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@NumberOfNewFields INT OUTPUT'
+	, @NumberOfNewFields = @NumberOfNewFields OUTPUT
+
+IF @NumberOfNewFields > @Zero
+	BEGIN
+		SET @NewFieldsExist = @True
+
+		SET @SQL =
+			'
+				SET @NewFieldName = STUFF((SELECT '', '' + ColumnName FROM ' + @TempMapTable + ' tm WHERE tm.SourceMetaDataID IS NULL FOR XML PATH(''''), TYPE).value(''.'', ''VARCHAR(MAX)'') , 1, 1, '''')
+
+			'
+
+		EXECUTE sp_executesql 
+			  @SQL
+			, N'@NewFieldName VARCHAR(MAX) OUTPUT'
+			, @NewFieldName = @NewFieldName OUTPUT
+		
+		IF @DebugFlag = @True
+			BEGIN
+				PRINT @NewFieldName
+			END
+
+		SET @ErrorString = 
+			'Unrecognized field detected on file!!! (Found field(s) name(s): ' + CONVERT(VARCHAR(MAX), @NewFieldName) + ') Number of unrecognized fields: ' + CONVERT(VARCHAR(3), @NumberofNewFields) + '.'    
+	END
+
+IF @NewFieldsExist = @True
+	BEGIN
+		RAISERROR(@ErrorString, 16, 1, 'usp_METAL1_FileToStage1MAIN_Stephtest')	
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Check to see if all required fields are there|||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @TotalMetaFileRequired =
+	(
+		SELECT 
+			COUNT(*) 
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition] sd
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData] smd 
+					ON sd.SourceMetaDataID = smd.ID
+		WHERE 
+				SourceProcessorID = @ProcessorID
+			AND ISNULL(FlexColumn, @False) = @False
+	)
+
+SET @SQL = 
+	'
+		SELECT 
+			@headerCnt = COUNT(*)  
+		FROM 
+			' + @TempMapTable + '  
+		WHERE 
+			RequiredField = ' + CONVERT(VARCHAR(3), @True) 
+
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@headerCnt INT OUTPUT'
+	, @headerCnt = @TotalFileHeaderRequired OUTPUT
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Count of required headers from METAL Tables'
+			, @TotalFileHeaderRequired
+	END
+
+SET @SQL = 
+	'
+		UPDATE 
+			tm
+		SET 
+			  tm.DestinationStage1ColumnID = sd.ID
+			, tm.DestinationMetaDataIDStage1 = sd.DestinationMetaDataID
+			, tm.DestinationColumnNameStage1 = sd.ColumnName
+			, tm.ColumnDataType = REPLACE(UPPER(sd.ColumnDataType), ''[VAR'', ''[VAR'')
+			, tm.ColumnSize = CASE 
+								WHEN sd.ColumnDataType LIKE ''%VARCHAR%'' AND sd.ColumnDataType NOT LIKE ''%MAX%''
+								THEN SUBSTRING(sd.ColumnDataType, CHARINDEX(''('', sd.ColumnDataType) + 1, (CHARINDEX('')'', sd.ColumnDataType) - CHARINDEX(''('', sd.ColumnDataType) - 1))
+			
+								ELSE ' + CONVERT(VARCHAR(3), @Zero) + ' 
+							  END
+	' 
+	+ CASE
+		WHEN @StoDMap = @True
+		THEN @EmptyString
+
+		ELSE
+			'
+			, tm.AdvertiserIncluded = smd.AdvertiserIncluded
+			, tm.GenericStaging = smd.GenericStaging
+			'
+	  END +
+	'
+		FROM 
+			' + @TempMapTable + ' tm 
+	' 
+	+ CASE
+		WHEN @StoDMap = @True
+		THEN 
+			'
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] stdm 
+					ON tm.SourceColumnID = stdm.SourceColumnID
+					AND tm.SourceMetaDataID = stdm.SourceMetaID
+				LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] sd 
+					ON stdm.DestinationColumnID = sd.ID
+			'
+
+		ELSE
+			'
+				LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] sd 
+					ON [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](sd.ColumnName, ''['', '']'') = [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.ColumnName, ''['', '']'')
+			' 
+	  END +
+	'
+				LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] smd 
+					ON sd.DestinationMetaDataID = smd.ID
+		WHERE 
+				smd.DestinationProcessorID = ' + CONVERT(VARCHAR(5), @ProcessorID) + ' 
+			AND smd.DestinationStageID = ' + CONVERT(VARCHAR(3), @Stage1ID) + '
+			AND smd.ActiveFlag = ' + CONVERT(VARCHAR(3), @True) + '
+			AND sd.ActiveFlag = ' + CONVERT(VARCHAR(3), @True) + '
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Check Required Fields SQL: ' + CASE 
+												WHEN @StoDMap = @True 
+												THEN ' SourceToDestMap Stg 1' 
+												
+												ELSE ' Stage 0' 
+											  END
+			, @SQL
+	END
+
+EXEC (@SQL)
+
+IF @DebugFlag = @True
+	BEGIN
+		SET @SQLDebug = 
+			'
+				SELECT 
+					* 
+				FROM 
+					' + @TempMapTable + '
+			'
+
+		EXEC (@SQLDebug)
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Check for Stage 2|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @isThereStage2 = 
+(
+	SELECT 
+		COUNT(*) 
+	FROM 
+		[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData]
+	WHERE 
+			DestinationProcessorID = @ProcessorID 
+		AND DestinationStageID = @Stage2ID
+		AND ActiveFlag = @True
+)
+
+IF @isThereStage2 > @Zero -- update the Stage 2 columns
+	BEGIN
+		SET @SQL = 
+			'
+				UPDATE 
+					tm
+				SET 
+					  tm.DestinationStage2ColumnID = sd.ID
+					, tm.DestinationMetaDataIDStage2 = sd.DestinationMetaDataID
+					, tm.DestinationColumnNameStage2 = sd.ColumnName
+					, tm.MergeOn = ISNULL(sd.MergeOn, ' + CONVERT(VARCHAR(10), @False) + ')
+					, tm.TransformationCode = ISNULL(sdc.SpecialTransformCode, ''NA'')
+				FROM 
+					' + @TempMapTable + ' tm 
+						INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] stdm 
+							ON tm.DestinationStage1ColumnID = stdm.SourceColumnID
+							AND tm.DestinationMetaDataIDStage1 = stdm.SourceMetaID
+						LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] sd 
+							ON stdm.DestinationColumnID = sd.ID
+						LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] sdc 
+							ON stdm.SourceColumnID = sdc.ID
+						LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] smd 
+							ON sd.DestinationMetaDataID = smd.ID
+				WHERE 
+						smd.DestinationProcessorID = ' + CONVERT(VARCHAR(5), @ProcessorID) + '  
+					AND smd.DestinationStageID = ' + CONVERT(VARCHAR(3), @Stage2ID) + '
+					AND smd.ActiveFlag = ' + CONVERT(VARCHAR(3), @True) + ' 
+					AND sd.ActiveFlag = ' + CONVERT(VARCHAR(3), @True) + '
+
+				UPDATE 
+					' + @TempMapTable + '   
+				SET
+ 					TransformationCodeReplace = 
+						LTRIM
+						(
+							  RTRIM
+							  (
+								  REPLACE
+								  (
+									  ISNULL
+									  (
+									     TransformationCode
+									   , ''NA''
+									  )
+									, ''[#FIELDNAME#]''
+									, DestinationColumnNameStage1
+								  )
+							  )
+						)
+			'
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT 
+					  'Is There Stage 2 SQL' 
+					, @SQL
+			END
+
+		EXEC (@SQL)
+
+		IF @DebugFlag = @True
+			BEGIN
+				SET @SQLDebug = 
+					'
+						SELECT 
+							* 
+						FROM 
+							' + @TempMapTable + '
+					'
+
+				EXEC (@SQLDebug)
+			END
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Create hdrck file table|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @LoopCount = 1
+
+SET @SQL = 
+	'
+		USE [' + @DestinationDB + ']  
+		
+		IF OBJECT_ID(''' + @HdrckFile + ''', ''U'') IS NOT NULL
+			DROP TABLE [dbo].[' + @HdrckFile + ']
+			 
+		CREATE TABLE [dbo].[' + @HdrckFile + ']
+			(
+	'
+
+WHILE @LoopCount <= @headerCount
+	BEGIN
+		SET @SQLInternal =
+			'
+				SELECT 
+					@varHeaderColumnName = [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](ColumnAlias, ''['', '']'') 
+				FROM 
+					' + @TempMapTable + ' tm  
+				WHERE 
+					FileColumnOrder = ' + CONVERT(VARCHAR(5), @LoopCount) + '
+			' 
+
+		EXECUTE sp_executesql 
+			  @SQLInternal
+			, N'@varHeaderColumnName NVARCHAR(MAX) OUTPUT'
+			, @varHeaderColumnName = @HeaderColumnName OUTPUT
+
+		SET @SQLInternal = 
+			'
+				SELECT 
+					@varHeaderColumnDataType = ColumnDataType 
+				FROM 
+					' + @TempMapTable + '  tm  
+				WHERE 
+					FileColumnOrder = ' + CONVERT(VARCHAR(5), @LoopCount) + '
+			'
+
+		EXECUTE sp_executesql 
+			  @SQLInternal
+			, N'@varHeaderColumnDataType NVARCHAR(MAX) OUTPUT'
+			, @varHeaderColumnDataType = @HeaderColumnDataType OUTPUT
+
+		SET @SQLInternal = 
+			'  			
+				SET @varSql =
+				(
+					SELECT 
+						@varSql + ''' + @HeaderColumnName + ' ' + @HeaderColumnDataType + ' NULL, ''
+					FROM 
+						' + @TempMapTable + '  
+					WHERE 
+						FileColumnOrder = ' + CONVERT(VARCHAR(5), @LoopCount) + '
+				)
+			'
+
+		EXECUTE sp_executesql 
+			  @SQLInternal
+			, N'@varSql VARCHAR(MAX) OUTPUT'
+			, @varSql = @varSql OUTPUT
+
+		SET @LoopCount = @LoopCount + 1
+	END
+	
+SET @SQL = 
+(
+	SELECT 
+		@SQL + ' ' + SUBSTRING(@varSql, 1, LEN(@varSql) - 1)
+)
+	
+SET @SQL = @SQL + ') ON [PRIMARY]'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Create Hdrck table SQL'
+			, @SQL
+	END
+
+EXEC (@SQL)
+
+--------------------------------------------------------------------------------------------------
+--||Insert Data into hdrck table||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+--Bill P. 9/12/17
+--Use ClientDB_Generic for destination DB if Generic Staging = True
+
+SET @SQL =
+	'
+		USE [' + @DestinationDB + '] 
+
+	' + CASE
+			WHEN @Extension = @Csv
+			THEN 
+				'
+					BULK INSERT 
+						' + @HdrckFile + ' 
+					FROM
+						''' + @FullFile + '''
+					WITH 
+						(
+							  FIELDTERMINATOR = '',''
+							, ROWTERMINATOR = ''' + @RowDelimiter + '''
+							, FIRSTROW = ' + CONVERT(VARCHAR(5), (2)) + '
+							, MAXERRORS = 10
+						) 
+				'
+
+			ELSE
+				'
+					INSERT INTO
+						' + @HdrckFile + '  
+					SELECT 
+						*  		 
+					FROM 
+						OPENROWSET
+							(
+								  ''Microsoft.ACE.OLEDB.12.0''
+								, ''Excel 12.0 Xml;HDR=NO;IMEX=1;Database=' + @FullFile + '''
+								, ''SELECT * FROM [' + @SheetName + ']''
+							) a 
+					WHERE 
+						a.[F1] IS NOT NULL 
+				'
+		END
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Bulk Insert to hdrck table SQL: ' + @Extension
+			, @SQL
+	END
+
+EXEC (@SQL)
+
+--------------------------------------------------------------------------------------------------
+--||If Debug, verify top 1000 rows for the file|||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+            
+IF @DebugFlag = @True
+	BEGIN
+		SET @SQLDebug = 
+			'
+				USE [' + @DestinationDB + '] 
+				
+				SELECT TOP 1000 
+					* 
+				FROM 
+					' + @HdrckFile + '
+			'
+
+		EXEC (@SQLDebug)
+	END
+	
+IF @isThereStage2 > @Zero
+	BEGIN
+		--get the stage 2 table
+		SELECT 
+			  @DestinationDB2 = REPLACE(ges.DestinationDatabase, '#', CONVERT(VARCHAR(5), @ClientParentID))
+			, @DestinationTable2 = REPLACE(ges.DestinationTableName, '#', CONVERT(VARCHAR(5), @ProviderID))
+			, @specialCode = dmd.SpecialCodeID
+			, @DestinationServer1 = ges.SourceServer
+			, @DestinationServer2 = ges.DestinationServer
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] dmd
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] ges 
+					ON ges.ConnectionStringID = dmd.ConnectionStringID
+					AND ges.DestinationStageID = dmd.DestinationStageID
+		WHERE 
+				dmd.DestinationProcessorID = @ProcessorID 
+			AND dmd.DestinationStageID = @Stage2ID 
+			AND dmd.ActiveFlag = @True
+
+		EXECUTE 
+			[MetalAdmin].[dbo].[usp_METAL1_CheckRefreshRate] 
+				  @DebugFlag = @False
+				, @AuditFlag = @False
+				, @StepNumber = @Zero
+				, @ProcessorID = @ProcessorID 
+				, @DestinationDB = @DestinationDB
+				, @DestinationTable = @DestinationTable
+				, @FileName = @FileName
+				, @ControlID = @ControlID
+				, @FileLocation = @FileLocation
+				, @CleanFlag = @CleanFlag   
+				, @TotalFileRows = @TotalFileRows
+				, @HeaderRowNumber = @HeaderRowNumber
+				, @GenericStaging = @Zero
+				, @StageID = @True 
+				, @DestinationDB2 = @DestinationDB2
+				, @DestinationTable2 = @DestinationTable2
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Is there any Preprocess?||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+IF @preProcessSP = 2 
+	BEGIN
+		SET @specialFunction = 
+			(
+				SELECT 
+					CHARINDEX
+					(
+						  '('
+						, @preProcessSP
+						, 1
+					)
+			)
+
+		IF @specialFunction > @Zero
+			BEGIN 
+				SET @spFunction = 
+				(
+					SELECT 
+						SUBSTRING
+						(
+							  @preProcessSP
+							, @specialFunction + 1
+							, ISNULL
+							  (
+								  (LEN(@preProcessSP) - (@specialFunction + 1))
+								, LEN(@preProcessSP)
+							  )
+						)
+				)
+					
+				SET @preProcessSP = 
+				(
+					SELECT 
+						SUBSTRING
+						(
+							  @preProcessSP
+							, 1
+							, CHARINDEX('(', @preProcessSP, 1) - 1
+						)
+				)
+			END
+		ELSE
+			BEGIN
+				SET @preProcessSP = @preProcessSP
+			END
+
+		SET @SQL = 
+			'
+				DECLARE 
+					@RC INT 
+
+				EXECUTE @RC = ' + @preProcessSP + '
+					  @ProviderID = ' + CAST(@ProviderID AS VARCHAR) + '
+					, @SourceServer  = ''' + @DestinationServer1 + '''
+					, @SourceDB = ''' + @DestinationDB + '''
+					, @SourceTblName = ''' + @HdrckFile + '''
+					, @DestinationServer = ''' + @DestinationServer1 + '''
+					, @DestinationDB = ''' + @DestinationDB + '''
+					, @DestinationTblName = ''' + @destinationTable + '''
+					, @FileName = ''' + @FileName + '''
+					, @Function = ''' + ISNULL(@spFunction, '''') + '''
+			'	
+			
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT 
+					  'Preprocess SQL'
+					, @SQL
+			END
+		
+		EXEC(@SQL)
+	END
+
+--------------------------------------------------------------------------------------------------
+--||Start Loading Stage 1|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @TotalStageColumns = 
+(
+	SELECT 
+		COUNT(*) 
+	FROM 
+		[MetalAdmin].[dbo].[vwDestinationColumnDefinitionActiveReordered] dcd
+			INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] smd 
+				ON dcd.DestinationMetaDataID = smd.ID
+	WHERE 
+			smd.DestinationProcessorID = @ProcessorID 
+		AND smd.DestinationStageID = @Stage1ID
+		AND ISNULL(dcd.ActiveFlag, @True) = @True
+)
+
+--------------------------------------------------------------------------------------------------
+--||Build SQL Create, Insert and Select Strings|||||||||||||||||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+
+SET @columnCount = 1 
+                              
+WHILE @columnCount <= @TotalStageColumns
+	BEGIN
+		SET @SQLCreate = 
+		(
+			SELECT  
+				@SQLCreate + ' , ' + [MetalAdmin].[dbo].[fnTrueQuoteName](dcd.ColumnName ,'[' , ']') + ' ' + dcd.ColumnDataType + ' NULL '     
+            FROM 
+				[MetalAdmin].[dbo].[vwDestinationColumnDefinitionActiveReordered] dcd
+					INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] smd 
+						ON dcd.DestinationMetaDataID = smd.ID
+			WHERE	smd.DestinationProcessorID = @ProcessorID 
+				AND smd.DestinationStageID = @Stage1ID
+                AND dcd.ColumnOrder = @columnCount 
+		)
+                                         
+		SET @columnCount = @columnCount + 1                                        
+	END
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'String of Create statement fields'
+			, @SQLCreate
+	END
+
+--Find LEN of Insert String
+SET @SQLColumns =
+	'
+		SET @SQLInsertColLen = LEN
+							   (
+								(
+									SELECT 
+										'','' + [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.DestinationColumnNameStage1, ''['', '']'') AS [text()]
+									FROM 
+										' + @TempMapTable + ' tm 
+									ORDER BY 
+										tm.FileColumnOrder 
+									FOR XML PATH ('''') 
+								)
+							   )
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'Find Len for Insert String SQL'
+			, @SQLColumns
+	END
+
+EXECUTE sp_executesql 
+	  @SQLColumns 
+	, N'@SQLInsertColLen BIGINT OUTPUT'
+	, @SQLInsertColLen = @SQLInsertColLen OUTPUT
+
+--Build Insert String
+SET @SQLColumns = 
+	'
+		SET @InsertCols = 
+			(
+				SELECT 
+					SUBSTRING
+					(
+						  (
+							SELECT 
+								'','' + [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.DestinationColumnNameStage1, ''['', '']'') AS [text()]
+							FROM 
+								' + @TempMapTable + ' tm 
+							ORDER BY 
+								tm.FileColumnOrder 
+							FOR XML PATH ('''') 
+						  )
+						, 2
+						, ' + CONVERT(VARCHAR(100), @SQLInsertColLen) + '
+					) 
+			)
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'Insert String SQL'
+			, @SQLColumns
+	END
+
+EXECUTE sp_executesql 
+	  @SQLColumns 
+	, N'@InsertCols NVARCHAR(MAX) OUTPUT'
+	, @InsertCols = @InsertCols OUTPUT
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'Insert String'
+			, @InsertCols
+	END
+
+--Find LEN of Select String
+SET @SQLColumns = 
+	'
+		SET @SQLSelectColLen = LEN
+							   (
+								(
+									SELECT 
+										'', '' + ''REPLACE(REPLACE('' + CASE 
+																		WHEN (tm.TransformationCode = ''NA'' OR tm.TransformationCodeReplace = ''NA'') 
+																		THEN [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.ColumnAlias, ''['', '']'') 
+																		
+																		ELSE tm.TransformationCodeReplace 
+																	   END + '', CHAR(10), ''''' + @EmptyString + '''''), CHAR(13), ''''' + @EmptyString + ''''')'' AS [text()]
+									FROM 
+										' + @TempMapTable + ' tm 
+									ORDER BY 
+										tm.FileColumnOrder 
+									FOR XML PATH ('''')
+								)
+							   )
+
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'Find Len for Select String SQL'
+			, @SQLColumns
+	END
+
+EXECUTE sp_executesql 
+	  @SQLColumns 
+	, N'@SQLSelectColLen BIGINT OUTPUT'
+	, @SQLSelectColLen = @SQLSelectColLen OUTPUT
+
+--Build Select String
+SET @SQLColumns =
+	'
+		SET @SelectCols = 
+			(
+				SELECT 
+					SUBSTRING
+					(
+						  (
+							SELECT 
+								'','' + ''REPLACE(REPLACE('' + CASE 
+																WHEN (tm.TransformationCode = ''NA'' OR tm.TransformationCodeReplace = ''NA'') 
+																THEN [' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.ColumnAlias, ''['', '']'') 
+																
+																ELSE tm.TransformationCodeReplace 
+															   END + '', CHAR(10), ''''' + @EmptyString + '''''), CHAR(13), ''''' + @EmptyString + ''''')'' AS [text()]
+							FROM 
+								' + @TempMapTable + ' tm 
+							ORDER BY 
+								tm.FileColumnOrder 
+						    FOR XML PATH ('''')
+						  )
+						, 2
+						, ' + CONVERT(VARCHAR(100), @SQLSelectColLen) + ' 
+					)
+			)
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT
+			  'Select String SQL'
+			, @SQLColumns
+	END
+
+EXECUTE sp_executesql 
+	  @SQLColumns
+	, N'@SelectCols NVARCHAR(MAX) OUTPUT'
+	, @SelectCols = @SelectCols OUTPUT
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Select String'
+			, @SelectCols
+	END
+
+SET @SQLColumns = 
+	'
+		SELECT @F1Col = 
+			( 
+				SELECT 
+					[' + @GenericClientDB + '].[dbo].[fnTrueQuoteName](tm.ColumnAlias, ''['', '']'') 
+				FROM 
+					' + @TempMapTable + ' tm  
+				WHERE 
+					tm.FileColumnOrder = 1
+			)
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'F1Col SQL'
+			, @SQLColumns
+	END
+            
+EXECUTE sp_executesql 
+	  @SQLColumns
+	, N'@F1Col NVARCHAR(MAX) OUTPUT'
+	, @F1Col = @F1Col OUTPUT
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'F1Col'
+			, @F1Col
+	END
+
+--------------------------------------------------------------------------------------------------
+--||GENERIC STAGING: If there are multiple clients in one file||||||||||||||||||||||||||||||||||--
+--------------------------------------------------------------------------------------------------
+SET @SQL = 
+	'
+		SELECT
+			@GenericAdvertiserInFile = (
+											SELECT
+												MAX(ISNULL(CONVERT(INT, AdvertiserIncluded), ' + CONVERT(VARCHAR(10), @Zero) + '))
+											FROM
+												' + @TempMapTable + '
+									   )
+	'
+
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@GenericAdvertiserInFile BIT OUTPUT'
+	, @GenericAdvertiserInFile = @GenericAdvertiserInFile OUTPUT
+
+IF @GenericStaging = @True
+	BEGIN
+		IF @GenericAdvertiserInFile = @True
+			BEGIN
+				SET @SQL = 
+					'
+						SELECT TOP 1 
+							@AdvertiserIncluded = AdvertiserIncluded 
+						FROM 
+							' + @TempMapTable + '
+					'
+				
+				EXECUTE sp_executesql 
+					  @SQL
+					, N'@AdvertiserIncluded INT OUTPUT'
+					, @AdvertiserIncluded = @GenericAdvertiserInFile OUTPUT
+
+			END    
+	END
+
+SET @SQL = 
+	'
+		SELECT TOP 1 
+			@DimensiontableIN = DimensionTable 
+		FROM 
+			' + @TempMapTable + '
+	'  
+		   
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@DimensiontableIN INT OUTPUT'
+	, @DimensiontableIN = @DimensionTable OUTPUT
+		
+IF @GenericStaging = @True -- and AdvertiserIncluded In the FILE DO THIS. Else get all the CPIDs assigned to this type of file in the ClientSchedule table. 
+	BEGIN
+		--SELECT @GenericAdvertiserInFile , @DimensionTable
+	
+		--Determine if this is a file for all clients or 0 advertisers
+		---------------create index for [advertiser ID] column on hdrck table for multiple clients---------------------------------------------------------
+		SET @SQL = 
+			CASE
+				WHEN @GenericAdvertiserInFile = @True
+				THEN
+					'
+						CREATE NONCLUSTERED INDEX 
+							[Advertiser_ID]
+						ON 
+							[' + @DestinationServer1 + '].[' + @destinationDB + '].[dbo].[' + @HdrckFile + ']
+							(
+								[Advertiser ID]
+							)
+					'
+
+				ELSE ''
+			END
+
+		--------------------------cpid dynamic sql for multiple clients with subquery ---------------------------------------------------------
+		SET @SQL = --@SQL + 
+			CASE
+				WHEN @GenericAdvertiserInFile = @True
+				THEN
+					'
+						SELECT DISTINCT
+							[Advertiser ID]
+						INTO 
+							' + @TempCPIDAdvertisersTable + ' 
+						FROM
+							[' + @destinationDB + '].[dbo].[' + @HdrckFile + '] (NOLOCK)
+					'
+
+				ELSE ''
+			END +
+			'
+				SELECT 
+					  ClientParentID
+					, ROW_NUMBER() OVER (ORDER BY ClientParentID) rown
+				INTO 
+					' + @TempCPIDTable + '
+				FROM 
+					(
+						SELECT DISTINCT
+							ISNULL(adv.clientParentID,' + CONVERT(VARCHAR(10), @DefaultCPID) + ') ClientParentID 
+						FROM  
+							[HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] adv
+			' + CASE
+					WHEN @GenericAdvertiserInFile = @True
+					THEN 
+						'
+								INNER JOIN ' + @TempCPIDAdvertisersTable + ' my 
+									ON adv.providerAdvertiserID = my.[Advertiser ID]
+								LEFT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[vwClientMetalSchedules] vcms 
+						'
+
+					ELSE
+						'
+								INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[vwClientMetalSchedules] vcms
+						'
+				END + 
+			'
+									ON vcms.ClientParentID = adv.clientParentID
+									AND vcms.ProviderID = adv.providerID 
+						WHERE
+								vcms.ProviderID = adv.providerID 
+							AND vcms.ProcessorID = ' + CONVERT(VARCHAR(10), @ProcessorID) + ' 
+							AND ISNULL(vcms.AssignmentActiveFlag, ' + CONVERT(VARCHAR(10), @False) + ') = ' + CONVERT(VARCHAR(10), @True) + '
+			' + CASE
+					WHEN @GenericAdvertiserInFile = @True 
+					THEN
+						'
+							AND [' + @GenericClientDB + '].[dbo].[fnIsTrueNumericID](ISNULL(my.[Advertiser ID], ''FALSE'')) = ''TRUE''
+						'
+
+					ELSE ''
+				END + 
+			'
+					) a
+			'
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT 
+					  'Split out CPIDs SQL'
+					, @SQL
+			END
+
+		EXEC (@SQL)
+		 
+		-------------------------------------------------------------------------------------------------------------------------------
+		---------------------------max(rown) for multiple clients------------------------------------------------------------------------------
+        SET @SQL = 
+			'  
+				SELECT 
+					@maxcnt = max(rown)   
+				FROM 
+					' + @TempCPIDTable + '
+			' 
+		    
+		EXECUTE sp_executesql 
+			  @SQL
+			, N'@maxcnt INT OUTPUT'
+			, @maxcnt = @CPIDmaxcnt OUTPUT
+		
+		----------------------------------------------------------------------------------------------------------------------------------
+		-----------------------------CPID loop for multiple clients-------------------------------------------------------------------------------
+        SET @CPIDloopcount = 1
+        
+		WHILE @CPIDloopcount <= ISNULL(@CPIDmaxcnt, @Zero)
+			BEGIN
+				SET @SQL = 
+					'
+						SELECT 
+							@newCPID = ClientParentID 
+						FROM 
+							' + @TempCPIDTable + '   
+						WHERE 
+							rown = ' + CONVERT(VARCHAR(5), @CPIDloopcount) + '
+					'
+            
+				EXECUTE sp_executesql 
+					  @SQL
+					, N'@newCPID INT OUTPUT'
+					, @newCPID = @newCPID OUTPUT
+		
+				SET @DestinationDB = 'ClientDB_CPID' + CONVERT(VARCHAR(10), @newCPID) + '_Staging'
+
+				------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+				----------------------------------------------------Create the Staging for multiple clients------------------------------------------------------------------------
+				SET @SQL = 
+					'
+						USE [' + @destinationDB + ']
+                                   
+                        IF OBJECT_ID(''' + @destinationTable + ''', ''U'') IS NULL
+							BEGIN
+								SET @StagingFlag = ' + CONVERT(VARCHAR(3), @True) + ' 
+                            END
+						ELSE
+							BEGIN
+								SET @StagingFlag = ' + CONVERT(VARCHAR(3), @False) + '
+							END
+					'
+
+				EXECUTE sp_executesql 
+					  @SQL
+					, N'@StagingFlag BIT OUTPUT'
+					, @StagingFlag = @StagingFlag OUTPUT
+
+				IF @DebugFlag = @True
+					BEGIN
+						SELECT
+							  'StagingFlag'
+							, @StagingFlag
+							, @SQL
+					END
+            
+				-----------------------------------------------------Check that staging table exists using staging flag
+				IF @StagingFlag = @True
+					BEGIN           
+						SET @SQL = 
+							'
+								USE [' + @destinationDB + ']
+                                    
+								CREATE TABLE 
+									' + @destinationTable + ' 
+									(
+										RowId BIGINT IDENTITY(1,1) NOT NULL
+										' + @SQLCreate + '
+									) ON [PRIMARY]  
+							'
+					
+						IF @SQL IS NOT NULL
+							BEGIN
+								EXEC (@SQL)
+							END
+					END
+             
+				--------------------------------------Insert into staging for multiple clients----------------------------------------------------------------------
+				SET @SQL = 
+					'
+						INSERT INTO 
+							[' + @DestinationDB + '].[dbo].[' + @DestinationTable + ']
+							(
+								  ' + @InsertCols + '
+								, ControlID
+								, LoadDateTime
+							)
+						SELECT 
+							  ' + @SelectCols + '
+							, ' + CAST(@ControlID AS VARCHAR) + '
+							, ''' + CAST(GETDATE() AS VARCHAR(20)) + ''' 
+						FROM 
+							[' + @OriginalDestinationDB + '].[dbo].[' + @HdrckFile + '] cdb
+					' + CASE 
+							WHEN @GenericAdvertiserInFile = @True
+							THEN
+								'
+								INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] adv 
+									ON cdb.[Advertiser ID] = adv.ProviderAdvertiserID
+								'
+
+							ELSE ''
+						END + 
+					'
+						WHERE 
+								ISNULL(' + @F1Col + ', ''NULL'') <> ''None'' 
+							AND ISNULL(' + @F1Col + ', '''') IS NOT NULL
+							AND ISNULL(' + @F1Col + ', ''NULL'') <> ''No data returned by the reporting service.''  
+							AND ISNULL(' + @F1Col + ', ''NULL'') NOT LIKE (''' + @RemoveFooter + ''') ' + 
+					CASE 
+						WHEN @GenericAdvertiserInFile = @True
+						THEN
+							' 
+							AND adv.ClientparentID = ' + CONVERT(VARCHAR(10), @newCPID) + ' 
+							AND	[' + @GenericClientDB + '].[dbo].[fnIsTrueNumericID](ISNULL(cdb.[Advertiser ID], ' + CONVERT(VARCHAR(10), @Zero) + ')) = ''TRUE'''
+
+						ELSE ''
+					END +
+					CASE
+						WHEN @Extension <> @Csv
+						THEN
+							'
+						EXCEPT
+						SELECT TOP 1 
+							  ' + @SelectCols + '
+							, ' + CAST(@ControlID AS VARCHAR) + '
+							, ''' + CAST(GETDATE() AS VARCHAR(20)) + ''' 
+						FROM 
+							[' + @OriginalDestinationDB + '].[dbo].[' + @HdrckFile + '] cdb
+							' + 
+							CASE
+								WHEN @GenericAdvertiserInFile = @True
+								THEN
+									'
+								INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] adv 
+									ON cdb.[Advertiser ID] = adv.ProviderAdvertiserID
+									'
+
+								ELSE ''
+							END + 
+							'
+								WHERE 
+										ISNULL(' + @F1Col + ', ''NULL'') <> ''None'' 
+									AND ISNULL(' + @F1Col + ', '''') IS NOT NULL
+									AND ISNULL(' + @F1Col + ', ''NULL'') <> ''No data returned by the reporting service.''  
+									AND ISNULL(' + @F1Col + ', ''NULL'') NOT LIKE (''' + @RemoveFooter + ''') 
+							' +
+							CASE 
+								WHEN @GenericAdvertiserInFile = @True
+								THEN
+									' 
+									AND adv.ClientparentID = ' + CONVERT(VARCHAR(10), @newCPID) + ' 
+									AND [' + @GenericClientDB + '].[dbo].[fnIsTrueNumericID](ISNULL(cdb.[Advertiser ID], ' + CONVERT(VARCHAR(10), @Zero) + ')) = ''TRUE''
+									'
+									  
+								ELSE ''
+							END
+								
+						ELSE ''
+					END
+				
+				IF @DebugFlag = @True
+					BEGIN
+						SELECT 
+							  'Split by ClientID SQL: ' + @Extension
+							, @SQL
+					END
+				ELSE
+					BEGIN
+						EXEC (@SQL)
+					END
+        
+				SET @CPIDloopcount = @CPIDloopcount + 1
+			END 
+ 
+		-------------------------------------------Insert nullprovideradvertiserIDs into ClientDB_CPID75_Staging  --------------------------------------------    
+		--create and check if I need the 75 -- check to see if 75 is active
+		SET @SQL = 
+			'  
+				SELECT 
+					@CPID75_Active = CASE
+										WHEN ISNULL
+											 (
+												  (
+													SELECT 
+														COUNT(*)    
+													FROM 
+														' + @TempCPIDTable  + ' 
+													WHERE 
+														ClientParentID = ' + CONVERT(VARCHAR(10), @DefaultCPID) + '
+												  )
+												, ' + CONVERT(VARCHAR(10), @Zero) + '
+											 ) > ' + CONVERT(VARCHAR(10), @Zero) + '
+										THEN ' + CONVERT(VARCHAR(10), @True) + '
+
+										ELSE ' + CONVERT(VARCHAR(10), @False) + '
+									 END 
+			'
+
+		EXECUTE sp_executesql 
+			  @SQL
+			, N'@CPID75_Active BIT OUTPUT'
+			, @CPID75_Active = @CPID75_Active OUTPUT
+
+		IF @CPID75_Active = @True 
+			BEGIN
+			----------------------------------Create ClientDB_CPID75_Staging table/skip if exists--------------------------------------------------------------------
+			SET @NoAdvertiserDB = 'ClientDB_CPID' + CONVERT(VARCHAR(10), @DefaultCPID) + '_Staging'
+	
+			SET @SQL = 
+				'
+					USE [' + @NoAdvertiserDB + ']
+                                   
+					IF OBJECT_ID(''' + @destinationTable + ''', ''U'') IS NULL
+						BEGIN
+							SET @StagingFlag75 = ' + CONVERT(VARCHAR(3), @True) + ' 
+						END
+					ELSE
+						BEGIN
+							SET @StagingFlag75 = ' + CONVERT(VARCHAR(3), @False) + '
+						END
+				'
+
+			EXECUTE sp_executesql 
+					  @SQL
+					, N'@StagingFlag75 INT OUTPUT'
+					, @StagingFlag75 = @StagingFlag75 OUTPUT
+        
+			-----------------------------------------------------Check that staging table exists using staging flag
+			IF @StagingFlag75 = @True
+				BEGIN           
+					SET @SQL = 
+						'
+							USE [' + @NoAdvertiserDB + ']
+                    
+							CREATE TABLE 
+								[' + @destinationTable + '] 
+								(
+									RowId BIGINT IDENTITY(1,1) NOT NULL
+									' + @InsertCols + '
+								) ON [PRIMARY]
+						'
+				END
+             
+			IF @SQL IS NOT NULL            
+				BEGIN
+					EXEC (@SQL)
+				END
+
+			SET @SQL = 
+				'
+					USE [' + @NoAdvertiserDB + ']
+            
+					INSERT INTO 
+						[' + @NoAdvertiserDB + '].[dbo].[' + @DestinationTable + '] 
+						(
+							  ' + @InsertCols + '
+							, ControlID
+							, LoadDateTime
+						)
+ 					 SELECT 
+						  ' + @SelectCols + '
+						, ' + CAST(@ControlID AS VARCHAR) + '
+						, ''' + CAST(GETDATE() AS VARCHAR(20)) + ''' 
+					 FROM 
+						[' + @OriginalDestinationDB + '].[dbo].[' + @HdrckFile + '] cdb
+				' + 
+				CASE
+					WHEN @GenericAdvertiserInFile = @True
+					THEN
+						'
+					WHERE 
+						ISNULL(' + (
+									SELECT TOP 1 
+										Data 
+									FROM 
+										[MetalAdmin].[dbo].[fnStringsplit]('[Advertiser ID]', ',') 
+									WHERE 
+										Data IN (
+													  '[Advertiser ID]'
+													, '[AdvertiserID]'
+													, '[ProviderAdvertiserID]'
+												)
+								   ) + ', ' + CONVERT(VARCHAR(10), @Zero) + ') = ' + CONVERT(VARCHAR(10), @Zero) + '
+						'
+
+					ELSE ''
+				END
+
+			EXEC (@SQL)
+
+			SET @SQL = 
+				' 
+					USE [' + @OriginalDestinationDB + '] 
+			
+					IF EXISTS
+					(
+						SELECT 
+							* 
+						FROM 
+							[INFORMATION_SCHEMA].[COLUMNS]
+						WHERE 
+							TABLE_NAME = ''vw' + @HdrckFile + '_bulk''
+					)
+						BEGIN TRY
+							DROP VIEW [dbo].[vw' + @HdrckFile + '_bulk]
+						END TRY
+	        
+						BEGIN CATCH
+							SELECT -1
+						END CATCH
+					'
+	
+			IF @DebugFlag = @True
+				SELECT @SQL
+			ELSE
+				EXEC (@SQL)
+		END
+	END
+ELSE
+	BEGIN
+		SET @SQLStaging = 
+			'
+				USE [' + @destinationDB + ']
+
+                IF OBJECT_ID(''' + @destinationTable + ''', ''U'') IS  NULL
+					CREATE TABLE ' + @destinationTable + ' 
+					(
+						RowId BIGINT IDENTITY(1,1) NOT NULL
+						' + @SQLCreate + '
+					) ON [PRIMARY]
+			' 
+		
+		IF @SQLStaging IS NOT NULL            
+			BEGIN
+				EXEC(@SQLStaging) 
+			END
+
+        SET @SQL = ' 
+                    SELECT 
+		                @vartableDateColumn = MIN([ColumnName]) 
+	                FROM 
+		            [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+	                WHERE	[ColumnName] LIKE ''%Date%'' 
+                        AND [ColumnName] <> ''[LoadDateTime]''
+		                AND DestinationStageID = ' + CONVERT(VARCHAR(10),@Stage1ID) +'
+		                AND DestinationMetaDataID = ' + CONVERT(VARCHAR(10), @Stage1DestinationMetaID) +' 
+		                AND ActiveFlag = ' + CONVERT(VARCHAR(10), @True) + '
+                        
+                     '
+        EXECUTE sp_executesql 
+					  @SQL
+					, N'@vartableDateColumn VARCHAR(100) OUTPUT'
+					, @vartableDateColumn = @TableDateColumn OUTPUT
+
+        IF @TableDateColumn is NULL
+        BEGIN
+            SET @TableDateColumnFlag = @False
+        END
+        ELSE
+        BEGIN
+            SET @TableDateColumnFlag = @True
+        END
+
+		SET @SQL =
+			'
+				INSERT INTO 
+					' + @FullDestinaion + ' 
+					(
+						  ' + @InsertCols + '
+						, ControlID
+						, LoadDateTime
+					)
+ 				SELECT 
+					  ' + @SelectCols + '
+					, ' + CAST(@ControlID AS VARCHAR) + '
+					, ''' + CAST(GETDATE() AS VARCHAR(20)) + ''' 
+				FROM 
+					[' + @DestinationDB + '].[dbo].[' + @HdrckFile + ']
+				WHERE 
+						ISNULL(' + @F1Col + ', ''NULL'') <> ''None'' 
+					AND ISNULL(' + @F1Col + ', '''') IS NOT NULL 
+					AND ISNULL(' + @F1Col + ', ''NULL'') <> ''No data returned by the reporting service.''  
+					AND ISNULL(' + @F1Col + ', ''NULL'') NOT LIKE (''' + @RemoveFooter + ''')               
+			' + 
+			CASE 
+				WHEN @Extension <> @Csv
+				THEN
+					'
+				EXCEPT
+				SELECT Top 1 
+					  ' + @SelectCols + '
+					, ' + CAST(@ControlID AS VARCHAR) + '
+					, ''' + CAST(GETDATE() AS VARCHAR(20)) + ''' 
+				FROM 
+					[' + @DestinationDB + '].[dbo].[' + @HdrckFile + ']
+				WHERE 
+						ISNULL(' + @F1Col + ', ''NULL'') <> ''None'' 
+					AND ISNULL(' + @F1Col + ', '''') IS NOT NULL 
+					AND ISNULL(' + @F1Col + ', ''NULL'') <> ''No data returned by the reporting service.''  
+					AND ISNULL(' + @F1Col + ', ''NULL'') NOT LIKE (''' + @RemoveFooter + ''') 
+               '
+
+				ELSE ''
+			END
+		
+		IF @DebugFlag = @True
+			SELECT 
+				  'Non-Generic Staging Insert to Stage 1 table SQL: ' + @Extension 
+				, @SQL
+		ELSE
+			BEGIN 
+				EXEC (@SQL)
+			END
+
+
+        
+
+
+
+		SET @SQL = 
+			'
+				USE [' + @DestinationDB + '] 
+
+
+				IF EXISTS
+				(
+					SELECT 
+						* 
+					FROM 
+						[INFORMATION_SCHEMA].[COLUMNS]
+					WHERE 
+						TABLE_NAME = ''vw' + @HdrckFile + '_bulk''
+				)
+					BEGIN TRY
+						DROP VIEW [dbo].[vw' + @HdrckFile + '_bulk]
+					END TRY
+	
+					BEGIN CATCH
+						SELECT -1
+					END CATCH
+			'
+
+
+		IF @DebugFlag = @True
+			SELECT @SQL
+		ELSE
+			EXEC (@SQL)
+	END
+
+SET @SQL = 
+	'
+		USE [' + @OriginalDestinationDB + '] 
+
+		IF OBJECT_ID(''' + @TempMapTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempMapTable + '
+
+		IF OBJECT_ID(''' + @TempCPIDTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempCPIDTable + '
+
+		IF OBJECT_ID(''' + @TempCPIDAdvertisersTable + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempCPIDAdvertisersTable + '
+
+	'
+
+EXEC (@SQL)
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT @SQL
+	END
+ELSE
+	BEGIN
+		EXEC (@SQL)
+	END
+
+END TRY
+
+BEGIN CATCH
+  THROW;
+END CATCH
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+GO
+
+
