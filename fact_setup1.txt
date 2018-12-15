@@ -1,0 +1,2526 @@
+/************MUST BE RUN ON HQIMPETL01************/
+USE [MetalAdmin]
+
+/*Generic ETL Setup Script: Generic CSV Format Inserts*/
+/*Run this script in chunks*/
+
+/*Bill P.*/
+
+/*
+
+NOTES:
+=================================================================================================
+Determine ID's
+=============================
+--Determine Provider ID
+SELECT
+		* 
+FROM
+		[HQDMOSQL04].[MetalAdmin].[dbo].[Providers] 
+WHERE 
+		providername like '%Moloco%'
+
+        --Taptica 95
+        --ESPN 68
+        --VideoAmp 96
+        --CBS 67
+        --AdColony 98
+        --Datorama 93
+        --ABC 72
+        --Charlottesville 130
+        --DBM 80
+        --Facebook 32
+        --NBCUniversal 69
+        --TheSearchMonitor 123
+        --Twitter 33
+        --Amazon 18
+        --powerlinks 134
+        --InMobi 135
+        --huntington bank 137
+        --MOAT 82
+        --Eloqua 139
+        --AppsFlyer 48
+
+--If New Provider, Create new Provider Record
+DECLARE  @ProviderName VARCHAR(500) = 'Eloqua'
+		,@ProviderImpressionTable VARCHAR(500) = 'SQL04'
+		,@ProviderActivityTable VARCHAR(500) = 'SQL04'
+		,@ProviderWebsite VARCHAR(500) = ''
+		,@ProviderContact VARCHAR(500) = ''
+		,@ProviderContactEmail VARCHAR(500) = 'Rodd Pribik'
+		,@ProviderChannelID INT = 1
+
+INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[Providers] (ProviderName,ProviderImpressionTable,ProviderActivityTable,ProviderWebsite,ProviderContact,ProviderContactPhone,ProviderContactEmail,ProviderChannelID) VALUES (@ProviderName,@ProviderImpressionTable,@ProviderActivityTable,@ProviderWebsite,@ProviderContact,@ProviderContactEmail,@ProviderChannelID,@ProviderChannelID)
+
+
+--Determine Client ID
+SELECT 
+		* 
+FROM 
+		[hqimpsql07].[Exsto].[dbo].[aClient]
+WHERE client_name like '%bloom%'
+--HBO NOW 14322
+--Target 14338
+--Mattress firm 14270
+--discover 14578
+--Office Depot 14013
+--NBC 3651
+--PNC 14093
+--huntington 13994
+--comcast business 14030
+--bloomingdales 14633
+
+update [hqimpsql07].[Exsto].[dbo].[aClient] 
+set client_name = 'Bloomingdales_old'
+where client_id = 1634
+
+
+--Determine Site ID
+SELECT	
+		*
+FROM 
+		[hqimpsql07].[Exsto].[dbo].[aSite]
+WHERE site_ID = 8530
+
+--mattress firm siteid = 7962
+--discover = 8447
+--office depot = 7329
+--PNC = 7364
+--Target = 8153
+--huntington = 6841
+--comcast business = 7053
+--bloomingdales = 8530
+
+--Determine the DataStreamSource
+SELECT 
+		* 
+FROM 
+		[HQIMPDW01].[Exsto].[dbo].[aDownload_Processors_DataStreams]
+--2 for ESPN
+--Now, we can insert the record to aDownload_Processors to get the new ProcessorID
+--This ID is used in alot of tables, and the Unloader.
+
+--Examples of Generic ETL Processors
+SELECT
+		*
+FROM
+		[HQIMPDW01].[Exsto].[dbo].[aDownload_Processors] 
+WHERE 
+		processor_name like '%ashley%'
+
+ORDER BY 
+		LoadDate DESC
+
+Select * from [HQDMOSQL04].[MetalAdmin].[dbo].clientparent where clientParentName like '%schn%'
+
+update [HQDMOSQL04].[MetalAdmin].[dbo].clientparent 
+set clientparentname = NULL
+where clientParentID = 97
+
+
+Office Depot = 6
+Discover = 84
+PNC = 1
+Target = 72
+Huntington Bank = 85
+comcast business = 87
+
+SELECT
+		*
+FROM
+		[HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+WHERE 
+		provideradvertiserID in (2408678
+,5677120
+,8777819
+,5025436
+,5680407
+,6816980)
+
+        /*
+UPDATE [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+SET provideradvertiserID = 2408678
+where advertiserID = 46274
+        */
+
+*/
+
+/***************************************************************************************************/
+/*		POPULATE VARIABLES																		   */
+/***************************************************************************************************/
+/*	Variables that will need to be populated before running  */
+DECLARE   @ExecuteFlag BIT = 1	--REVIEW SELECT STATEMENTS: Set to 0 to review Dynamic SQL, Set to 1 to EXECUTE sp_executesqlute Dynamic SQL
+		, @DebugFlag BIT = 0	--REVIEW OVERALL SYNTAX: Set to 1 to review selects before inserting, Set to 0 to Insert
+		, @ProcessorID BIGINT = 2729           --2597               -- If not an existing Proc ID, then 0: Naming Convention is typically SSIS GenericETL ESPN HBO NOW 
+		, @ProviderID BIGINT = 4
+		, @ClientID BIGINT = 14633
+		, @SiteID BIGINT = 8530
+		, @ClientParentID BIGINT = 99
+		, @DmContactName VARCHAR(MAX) = session_user
+		, @DataStreamSource BIGINT = 1
+		, @ColumnDelimiter CHAR(1) = ',' --Delimiter from the file
+		, @TextQualifier CHAR(1) = '' --Text qualifier from the file
+		, @RowDelimiter VARCHAR(10) = '\r\n' --Row Delimiter from the file
+		, @DataLevel VARCHAR(50) = 'Log' --Log or Summary.  If it doesn't say Log in the file, safe to say it is Summary
+		, @BatchID INT = 3--Determines which Batch Job this processor would be executed by
+
+DECLARE 
+		  @Stage2TableName VARCHAR(MAX) = 'PV#DailyDCMClick'+@DataLevel--Naming Convention is PV#[Occurance][Provider][Client][Summary/Log]PV#DailyAmazonTuneInDailySummaryStaging
+		, @SourceFileName VARCHAR(MAX) = 'dcm_account5940_click_'--The non-specific portion of your filename.
+		, @SourceFileExtension VARCHAR(10) = 'csv' --Used in the package to determine if it's a CSV or Excel file
+		, @CleanFlag INT = 1 --Determines whether to use the file cleaning script or not.
+		, @Header VARCHAR(MAX) = 'Event Time,User ID,Advertiser ID,Campaign ID,Ad ID,Rendering ID,Creative Version,Site ID (DCM),Placement ID,Country Code,State/Region,Browser/Platform ID,Browser/Platform Version,Operating System ID,Designated Market Area (DMA) ID,City ID,ZIP/Postal Code,U Value,Event Type,Event Sub-Type,DBM Auction ID,DBM Request Time,DBM Advertiser ID,DBM Insertion Order ID,DBM Line Item ID,DBM Creative ID,DBM Bid Price (USD),DBM Bid Price (Partner Currency),DBM Bid Price (Advertiser Currency),DBM URL,DBM Site ID,DBM Language,DBM Adx Page Categories,DBM Matching Targeted Keywords,DBM Exchange ID,DBM Attributed Inventory Source External ID,DBM Attributed Inventory Source Is Public,DBM Ad Position,DBM Country Code,DBM Designated Market Area (DMA) ID,DBM ZIP/Postal Code,DBM State/Region ID,DBM City ID,DBM Operating System ID,DBM Browser/Platform ID,DBM Browser Timezone Offset Minutes,DBM Net Speed,DBM Matching Targeted Segments,DBM ISP ID,DBM Device Type,DBM Mobile Make ID,DBM Mobile Model ID,DBM View State,DBM Media Cost (USD),DBM Media Cost (Partner Currency),DBM Media Cost (Advertiser Currency),DBM Revenue (USD),DBM Revenue (Partner Currency),DBM Revenue (Advertiser Currency),DBM Total Media Cost (USD),DBM Total Media Cost (Partner Currency),DBM Total Media Cost (Advertiser Currency),DBM CPM Fee 1 (USD),DBM CPM Fee 1 (Partner Currency),DBM CPM Fee 1 (Advertiser Currency),DBM CPM Fee 2 (USD),DBM CPM Fee 2 (Partner Currency),DBM CPM Fee 2 (Advertiser Currency),DBM CPM Fee 3 (USD),DBM CPM Fee 3 (Partner Currency),DBM CPM Fee 3 (Advertiser Currency),DBM CPM Fee 4 (USD),DBM CPM Fee 4 (Partner Currency),DBM CPM Fee 4 (Advertiser Currency),DBM CPM Fee 5 (USD),DBM CPM Fee 5 (Partner Currency),DBM CPM Fee 5 (Advertiser Currency),DBM Media Fee 1 (USD),DBM Media Fee 1 (Partner Currency),DBM Media Fee 1 (Advertiser Currency),DBM Media Fee 2 (USD),DBM Media Fee 2 (Partner Currency),DBM Media Fee 2 (Advertiser Currency),DBM Media Fee 3 (USD),DBM Media Fee 3 (Partner Currency),DBM Media Fee 3 (Advertiser Currency),DBM Media Fee 4 (USD),DBM Media Fee 4 (Partner Currency),DBM Media Fee 4 (Advertiser Currency),DBM Media Fee 5 (USD),DBM Media Fee 5 (Partner Currency),DBM Media Fee 5 (Advertiser Currency),DBM Data Fees (USD),DBM Data Fees (Partner Currency),DBM Data Fees (Advertiser Currency),DBM Billable Cost (USD),DBM Billable Cost (Partner Currency),DBM Billable Cost (Advertiser Currency),Active View: Eligible Impressions,Active View: Measurable Impressions,Active View: Viewable Impressions,Partner2 ID,Landing Page URL ID,Referrer URL,Asset ID,Activity ID,Floodlight Configuration,TRAN Value,Interaction Time,Conversion ID,Segment Value 1,Rich Media Event ID,Rich Media Event Type ID,Total Conversions,Total Revenue,Event Timers,Event Counters,DBM Campaign ID,Google Click ID,Partner1 ID,Other Data,Impression ID,Creative Pixel Size,ORD Value'--Copy/Paste header row from the file
+		, @RowsToSkip INT = 0--If extra header rows, this says the number of rows to skip
+		, @FooterStopValue VARCHAR(MAX) = NULL --Tells when to stop reading the file
+		, @ValueBeforeHeader VARCHAR(MAX) = ''--Tells when to start reading the file
+		, @ReplaceData BIT = 0 --number of days to reload data
+
+/***************************************************************************************************/
+/*	Variables that will remain mostly static for a generic setup  */
+DECLARE 
+		  @SQLInsert NVARCHAR(MAX)
+		, @SQLSelect NVARCHAR(MAX)
+		, @SQLUpdate NVARCHAR(MAX)
+		, @SQL NVARCHAR(MAX)
+
+DECLARE	  @EmptyString VARCHAR(1) = ''
+		, @Space VARCHAR(1) = ' '
+		, @Zero INT = 0
+		, @True BIT = 1
+		, @False BIT = 0
+		, @RefreshData BIT = 0
+		, @RefreshRateInDays INT = 0
+		, @SpecialCodeID INT = CASE WHEN @ReplaceData = 'TRUE' THEN 15 ELSE 0 END
+		, @AdvertiserID BIGINT = 0
+		, @SourceMetaDataID BIGINT = 0
+		, @SourceHeaderID BIGINT = null
+		, @DestinationMetaDataIDStage1 BIGINT = 0
+		, @DestinationMetaDataIDStage2 BIGINT = 0
+		, @Stage0ConnectionString BIGINT = 0
+		, @Stage1ConnectionString BIGINT = 0
+		, @Stage2ConnectionString BIGINT = 0
+		, @CMAIDStage1 BIGINT = 0
+		, @CMAIDStage2 BIGINT = 0
+		, @Stage0DataBaseName VARCHAR(MAX) = 'ExstoDisplay'
+		, @Stage1DataBaseName VARCHAR(MAX) = 'ClientDB_CPID#_Staging'
+		, @Stage2DataBaseName VARCHAR(MAX) = 'ClientDB_CPID#'
+		, @SQL04ServerName VARCHAR(MAX) = 'HQDMOSQL04'
+		, @SQL03ServerName VARCHAR(MAX) = 'HQDMOSQL03'
+		, @Stage0TableName VARCHAR(MAX) = @Stage2TableName + 'Staginghdrck'
+		, @Stage1TableName VARCHAR(MAX) = @Stage2TableName + 'Staging'
+		, @aDownload_controlTableName VARCHAR(MAX) = 'aDownload_control'
+		, @ConnectionTypeFile VARCHAR(MAX) = 'File'
+		, @ConnectionTypeTable VARCHAR(MAX) = 'Table'
+		, @HelpTicketServer VARCHAR(50) = 'HQIMPDW01'
+		, @HelpTicketServerDatabase VARCHAR(50) = 'Exsto'
+		, @HelpTicketTableName VARCHAR(50) = 'HelpTickets'
+		, @StageID0 INT = 0
+		, @StageID1 INT = 1
+		, @StageID2 INT = 2
+		, @ProviderName VARCHAR(MAX) = (Select providername from [HQDMOSQL04].[MetalAdmin].[dbo].providers where providerid = @ProviderID)
+		, @ClientName VARCHAR(MAX) = (Select clientparentname from [HQDMOSQL04].[MetalAdmin].[dbo].clientparent where clientparentID = @ClientParentID)
+		, @Production VARCHAR(1) = 'Y' --For first time/manual loads, use M.  P = Production, T = Test, doesn't load past hdrck
+		, @StatusDescription VARCHAR(MAX) = 'Active' --Used by the fileload audit.  Be sure to update when you are done testing.
+		, @CreatedDate datetime = GETDATE()
+		, @Stage1DataType VARCHAR(MAX) = '[DT_STR]'
+		, @Stage1DestinationDataType VARCHAR(MAX) = '[VARCHAR]'
+		, @Stage1ColumnWidth INT = 200
+		, @ColumnLoopCounterStage0 BIGINT = 1
+		, @ColumnOrderStage0 BIGINT = 0
+		, @ColumnLoopCounterStage1 BIGINT = 1
+		, @ColumnOrderStage1 BIGINT = 0
+		, @DefaultScheduleTime VARCHAR(50) = '00:10:00.0000000'
+		, @PrioritySeq INT = 9999
+		
+DECLARE	  @ResetSQL NVARCHAR(MAX) = 
+			'SET @SQLInsert = NULL; SET @SQLSelect = NULL; SET @SQLUpdate = NULL; SET @SQL = NULL;'
+
+/***************************************************************************************************/
+/*	Modify If you need a custom Schedule  */
+DECLARE	
+		  @SundayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @MondayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @TuesdayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @WednesdayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @ThursdayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @FridayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+		, @SaturdayScheduleTime VARCHAR(50) = @DefaultScheduleTime
+
+
+--Step 1) Create AdvertiserID if not exists
+/***************************************************************************************************/
+/*	
+	This record is unique to the ClientParent/Client/Site/Provider and ties the Identifiers to a specific ID.
+	Clients can have multiple advertiser ID's for each provider (ex. different sites/billing entities/datasets, etc.)
+	If there is an existing advertiser ID for your ClientParent/Client/Site/Provider combo, use that ID.
+*/
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+	WHERE siteid = @SiteID 
+	  AND ClientID = @ClientID 
+	  AND ProviderID = @ProviderID
+
+      )
+	BEGIN
+		SET @SQLInsert = 
+		'	
+			--Advertisers Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+			(
+				  advertisername
+				, advertiserPrefix
+				, siteid
+				, clientid
+				, providerid
+				, provideradvertiserid
+				, clientParentID
+				, clientDBFlag
+			)
+		'
+
+		SET @SQLSelect = 
+		'	
+			--Advertisers Select
+			SELECT
+				  @ClientName + '' '' + @ProviderName	''advertisername''
+				, @EmptyString							''advertiserPrefix''
+				, @SiteID								''siteid''
+				, @ClientID								''clientid''
+				, @ProviderID							''providerid''
+				, @Zero									''provideradvertiserid''
+				, @ClientParentID						''clientParentID''
+				, 1										''clientDBFlag''
+		'
+		
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N'@ClientName VARCHAR(MAX)
+					  , @ProviderName VARCHAR(MAX)
+					  , @EmptyString VARCHAR(1)
+					  , @SiteID BIGINT
+					  , @ClientID BIGINT
+					  , @ProviderID BIGINT
+					  , @Zero INT
+					  , @ClientParentID BIGINT'
+					, @ClientName = @ClientName
+					, @ProviderName = @ProviderName
+					, @EmptyString = @EmptyString
+					, @SiteID = @SiteID
+					, @ClientID = @ClientID
+					, @ProviderID = @ProviderID
+					, @Zero = @Zero
+					, @ClientParentID = @ClientParentID
+			END
+	END
+		
+ELSE
+	SELECT 
+		  'Advertiser Record'
+		, * 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+	WHERE siteid = @SiteID 
+	  AND ClientID = @ClientID 
+	  AND ProviderID = @ProviderID
+		
+SET @AdvertiserID = 
+	(
+		SELECT AdvertiserID 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[Advertisers] 
+		WHERE siteid = @SiteID 
+		  AND ClientID = @ClientID 
+		  AND ProviderID = @ProviderID
+	)
+
+
+
+
+
+--Step 2) Create the Processor ID record
+/***************************************************************************************************/
+/*
+	This is the main ID that drives all the configuration tables.  Aside from AdvertiserID, this is the MOST IMPORTANT!!!
+*/
+
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF (@ProcessorID = 0)
+	BEGIN
+		IF NOT EXISTS 
+		(
+			SELECT 1
+			FROM [HQIMPDW01].[Exsto].[dbo].[aDownload_Processors] 
+			WHERE site_id = @SiteID 
+			  and processor_name = 'SSIS GenericETL ' + @ProviderName
+		)
+			--!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			--BE SURE TO INSERT TO HQIMPDW01, OTHERWISE IT WILL NOT BE REPLICATED DOWN TO THE OTHER SERVERS
+			--!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	
+			BEGIN
+				SET @SQLInsert =
+				'
+					--aDownload_Processors Insert
+					INSERT INTO [HQIMPDW01].[Exsto].[dbo].[aDownload_Processors]
+					(
+						  site_id
+						, processor_name
+						, processor_description
+						, DataStreamSourceID
+						, DMContactName
+						, SSIS_FilePath
+						, SSIS_SolutionName
+						, inBidwise
+						, Data_Type_ID
+						, ServerName
+						, DatabaseName
+						, Active
+						, ProviderID
+						, AdvertiserID
+						, ClientParentID
+					)
+				'
+
+				SET @SQLSelect = 
+				'
+					--aDownload_Processors Select
+					SELECT
+						  @SiteID																								''site_id''
+						, ''SSIS GenericETL '' + @ProviderName																	''processor_name''
+						, ''SSIS GenericETL '' + @ProviderName																	''processor_description''
+						, @DataStreamSource																						''DataStreamSourceID''
+						, @DMContactName																						''DMContactName''
+						, ''\\HQIMPETL01\General_Data\SSIS_Production\GenericSSIS_VS2010\GenericSSIS_VS2010\Metal_Stage1.dtsx''	''SSIS_FilePath''
+						, ''GenericSSIS_VS2010.sln''																			''SSIS_SolutionName''
+						, @Zero																									''inBidwise''
+						, @Zero																									''Data_Type_ID''
+						, @SQL04ServerName																						''ServerName''
+						, @Stage2DataBaseName																					''DatabaseName''
+						, @True																									''Active''
+						, @ProviderID																							''ProviderID''
+						, @AdvertiserID																							''AdvertiserID''
+						, @ClientParentID																						''ClientParentID''
+				'
+
+				IF @DebugFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+						SELECT @SQL
+					END
+				ELSE
+					BEGIN
+						IF @ExecuteFlag = 1
+							BEGIN
+								SET @SQL = @SQLInsert +  @SQLSelect
+							END
+						ELSE
+							BEGIN
+								SET @SQL = @SQLSelect
+							END
+					
+						EXECUTE sp_executesql 
+							  @SQL
+							, N'@SiteID BIGINT
+							  , @ProviderName VARCHAR(MAX)
+							  , @DataStreamSource BIGINT
+							  , @DMContactName VARCHAR(MAX)
+							  , @Zero INT 
+							  , @SQL04ServerName VARCHAR(MAX)
+							  , @Stage2DataBaseName VARCHAR(MAX) 
+							  , @True BIT 
+							  , @ProviderID BIGINT
+							  , @AdvertiserID BIGINT
+							  , @ClientParentID BIGINT'
+							, @SiteID = @SiteID
+							, @ProviderName = @ProviderName
+							, @DataStreamSource = @DataStreamSource
+							, @DMContactName = @DMContactName
+							, @Zero = @Zero
+							, @SQL04ServerName = @SQL04ServerName
+							, @Stage2DataBaseName = @Stage2DataBaseName
+							, @True = @True
+							, @ProviderID = @ProviderID
+							, @AdvertiserID = @AdvertiserID
+							, @ClientParentID = @ClientParentID
+					END
+			END																		
+		ELSE
+			SELECT 
+				  'aDownload_Processor Record'
+				, * 
+			FROM [HQIMPDW01].[Exsto].[dbo].[aDownload_Processors] 
+			WHERE site_id = @SiteID 
+			  AND processor_name = 'SSIS GenericETL ' + @ProviderName
+
+		SET @ProcessorID =  
+			(
+				SELECT processor_ID 
+				FROM [HQIMPDW01].[Exsto].[dbo].[aDownload_Processors] 
+				WHERE site_id = @SiteID 
+				  AND processor_name = 'SSIS GenericETL ' + @ProviderName
+			)
+	END
+ELSE
+	BEGIN
+		SELECT 'aDownload_Processor Record'
+				, * 
+		FROM [HQIMPDW01].[Exsto].[dbo].[aDownload_Processors] 
+		WHERE processor_ID = @ProcessorID
+	END
+
+
+
+
+
+
+--Step 3) Create Connection Strings
+/***************************************************************************************************/	
+/*
+	Create the records for the connection strings for Summary/Log and SummaryStaging/LogStaging tables.  The
+	SQL tasks in the package dynamically build the connection strings based on the records for your Processor.
+	'#' symbols are used in token replacement to populate ClientParentID for Database Names and Provider ID's in table names.
+
+		-Stage 0 pulls the data in from SQL03 aDownload_Control to Staginghdrck table
+		-Stage 1 pulls the data in from Staginghdrck table to Staging table
+		-Stage 2 pulls the date in from Staging table to display table
+*/
+
+--Insert Stage0
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT 
+
+IF NOT EXISTS
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	WHERE processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID0 
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Stage 0 Connection String Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings]
+			(
+				  Processor_ID
+				, SourceConnectionType
+				, SourceServer
+				, SourceDatabase
+				, SourceTableName
+				, DestinationStageID
+				, DestinationServer
+				, DestinationDatabase
+				, DestinationTableName
+				, HelpTicketServer
+				, HelpTicketServerDatabase
+				, HelpTicketTableName
+				, DestinationConnectionType
+				, HasDataInCorrectFormat
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 0 Connection String Select
+			SELECT
+				  @ProcessorID					''Processor_ID''
+				, @ConnectionTypeFile			''SourceConnectionType''
+				, @SQL03ServerName				''SourceServer''
+				, @Stage0DataBaseName			''SourceDatabase''
+				, @aDownload_controlTableName	''SourceTableName''
+				, @StageID0						''DestinationStageID''
+				, @SQL04ServerName				''DestinationServer''
+				, @Stage1DataBaseName			''DestinationDatabase''
+				, @Stage0TableName				''DestinationTableName''
+				, @HelpTicketServer				''HelpTicketServer''
+				, @HelpTicketServerDatabase		''HelpTicketServerDatabase''
+				, @HelpTicketTableName			''HelpTicketTableName''
+				, @ConnectionTypeTable			''DestinationConnectionType''
+				, @False						''HasDataInCorrectFormat''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert + @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ProcessorID BIGINT
+					   , @ConnectionTypeFile VARCHAR(MAX)		
+					   , @SQL03ServerName VARCHAR(MAX)
+					   , @Stage0DataBaseName VARCHAR(MAX)
+					   , @aDownload_controlTableName VARCHAR(MAX)
+					   , @StageID0 INT
+					   , @SQL04ServerName VARCHAR(MAX)
+					   , @Stage1DataBaseName VARCHAR(MAX)
+					   , @Stage0TableName VARCHAR(MAX)
+					   , @HelpTicketServer VARCHAR(MAX)
+					   , @HelpTicketServerDatabase VARCHAR(MAX)
+					   , @HelpTicketTableName VARCHAR(MAX)
+					   , @ConnectionTypeTable VARCHAR(MAX)
+					   , @False BIT'
+					, @ProcessorID = @ProcessorID
+					, @ConnectionTypeFile = @ConnectionTypeFile		
+					, @SQL03ServerName = @SQL03ServerName
+					, @Stage0DataBaseName = @Stage0DataBaseName
+					, @aDownload_controlTableName = @aDownload_controlTableName
+					, @StageID0 = @StageID0
+					, @SQL04ServerName = @SQL04ServerName
+					, @Stage1DataBaseName = @Stage1DataBaseName
+					, @Stage0TableName = @Stage0TableName
+					, @HelpTicketServer = @HelpTicketServer
+					, @HelpTicketServerDatabase = @HelpTicketServerDatabase
+					, @HelpTicketTableName = @HelpTicketTableName
+					, @ConnectionTypeTable = @ConnectionTypeTable
+					, @False = @False
+			END
+
+	END
+ELSE
+	SELECT 
+		  'Connection String Stage 0'
+		, * 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	WHERE processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID0
+
+SET @Stage0ConnectionString = 
+	(
+		SELECT connectionstringid 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+		WHERE processor_ID = @ProcessorID 
+		  AND DestinationStageID = @StageID0
+	)
+
+--Insert Stage1	
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+	
+IF NOT EXISTS
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	WHERE processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID1 
+)
+	BEGIN
+		SET @SQLInsert = 
+		'
+			--Stage 1 Connection String Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings]
+			(
+				  Processor_ID
+				, SourceConnectionType
+				, SourceServer
+				, SourceDatabase
+				, SourceTableName
+				, DestinationStageID
+				, DestinationServer
+				, DestinationDatabase
+				, DestinationTableName
+				, HelpTicketServer
+				, HelpTicketServerDatabase
+				, HelpTicketTableName
+				, DestinationConnectionType
+				, HasDataInCorrectFormat
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 1 Connection String Select
+			SELECT
+				  @ProcessorID				''Processor_ID''
+				, @ConnectionTypetable		''SourceConnectionType''
+				, @SQL04ServerName			''SourceServer''
+				, @Stage1DataBaseName		''SourceDatabase''
+				, @Stage0TableName			''SourceTableName''
+				, @StageID1					''DestinationStageID''
+				, @SQL04ServerName			''DestinationServer''
+				, @Stage1DataBaseName		''DestinationDatabase''
+				, @Stage1TableName			''DestinationTableName''
+				, @HelpTicketServer			''HelpTicketServer''
+				, @HelpTicketServerDatabase	''HelpTicketServerDatabase''
+				, @HelpTicketTableName		''HelpTicketTableName''
+				, @ConnectionTypeTable		''DestinationConnectionType''
+				, @False					''HasDataInCorrectFormat''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ProcessorID BIGINT
+					   , @ConnectionTypetable VARCHAR(MAX)		
+					   , @SQL04ServerName VARCHAR(MAX)
+					   , @Stage1DataBaseName VARCHAR(MAX)
+					   , @Stage0TableName VARCHAR(MAX)
+					   , @StageID1 INT
+					   , @Stage1TableName VARCHAR(MAX)
+					   , @HelpTicketServer VARCHAR(MAX)
+					   , @HelpTicketServerDatabase VARCHAR(MAX)
+					   , @HelpTicketTableName VARCHAR(MAX)
+					   , @False BIT'
+					, @ProcessorID = @ProcessorID
+					, @ConnectionTypetable = @ConnectionTypetable		
+					, @SQL04ServerName = @SQL04ServerName
+					, @Stage1DataBaseName = @Stage1DataBaseName
+					, @Stage0TableName = @Stage0TableName
+					, @StageID1 = @StageID1
+					, @Stage1TableName = @Stage1TableName
+					, @HelpTicketServer = @HelpTicketServer
+					, @HelpTicketServerDatabase = @HelpTicketServerDatabase
+					, @HelpTicketTableName = @HelpTicketTableName
+					, @False = @False
+			END
+	END
+ELSE
+	SELECT 
+		  'Connection String Stage 1'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	where processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID1
+
+SET @Stage1ConnectionString = 
+	(
+		SELECT connectionstringid 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+		WHERE processor_ID = @ProcessorID 
+		  AND DestinationStageID = @StageID1
+	)
+
+--Insert Stage2
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	WHERE processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID2 
+)
+	BEGIN
+		SET @SQLInsert = 
+		'
+			--Stage 2 Connection String Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings]
+			(
+				  Processor_ID
+				, SourceConnectionType
+				, SourceServer
+				, SourceDatabase
+				, SourceTableName
+				, DestinationStageID
+				, DestinationServer
+				, DestinationDatabase
+				, DestinationTableName
+				, HelpTicketServer
+				, HelpTicketServerDatabase
+				, HelpTicketTableName
+				, DestinationConnectionType
+				, HasDataInCorrectFormat
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 2 Connection String Select
+			SELECT
+				  @ProcessorID				''Processor_ID''
+				, @ConnectionTypetable		''SourceConnectionType''
+				, @SQL04ServerName			''SourceServer''
+				, @Stage1DataBaseName		''SourceDatabase''
+				, @Stage1TableName			''SourceTableName''
+				, @StageID2					''DestinationStageID''
+				, @SQL04ServerName			''DestinationServer''
+				, @Stage2DataBaseName		''DestinationDatabase''
+				, @Stage2TableName			''DestinationTableName''
+				, @HelpTicketServer			''HelpTicketServer''
+				, @HelpTicketServerDatabase	''HelpTicketServerDatabase''
+				, @HelpTicketTableName		''HelpTicketTableName''
+				, @ConnectionTypeTable		''DestinationConnectionType''
+				, @False					''HasDataInCorrectFormat''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ProcessorID BIGINT
+					   , @ConnectionTypetable VARCHAR(MAX)		
+					   , @SQL04ServerName VARCHAR(MAX)
+					   , @Stage1DataBaseName VARCHAR(MAX)
+					   , @Stage1TableName VARCHAR(MAX)
+					   , @StageID2 INT
+					   , @Stage2DataBaseName VARCHAR(MAX)
+					   , @Stage2TableName VARCHAR(MAX)
+					   , @HelpTicketServer VARCHAR(MAX)
+					   , @HelpTicketServerDatabase VARCHAR(MAX)
+					   , @HelpTicketTableName VARCHAR(MAX)
+					   , @False BIT'
+					, @ProcessorID = @ProcessorID
+					, @ConnectionTypetable = @ConnectionTypetable		
+					, @SQL04ServerName = @SQL04ServerName
+					, @Stage1DataBaseName = @Stage1DataBaseName
+					, @Stage1TableName = @Stage1TableName
+					, @StageID2 = @StageID2
+					, @Stage2DataBaseName = @Stage2DataBaseName
+					, @Stage2TableName = @Stage2TableName
+					, @HelpTicketServer = @HelpTicketServer
+					, @HelpTicketServerDatabase = @HelpTicketServerDatabase
+					, @HelpTicketTableName = @HelpTicketTableName
+					, @False = @False
+			END
+	END
+ELSE
+	SELECT 
+		  'Connection String Stage 2'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+	WHERE processor_ID = @ProcessorID 
+	  AND DestinationStageID = @StageID2
+
+SET @Stage2ConnectionString = 
+	(
+		SELECT connectionstringid 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] 
+		WHERE processor_ID = @ProcessorID 
+		  AND DestinationStageID = @StageID2
+	)
+
+
+
+
+
+--Step 4) Create Source Meta Data and Source Header records
+/***************************************************************************************************/
+/*
+	Holds meta data information about the raw file (i.e. Delimiter, row ending delimiter, extension, etc.)
+*/
+
+--Insert to SourceMetaData
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourcemetadata] 
+	WHERE sourceprocessorID = @ProcessorID 
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Source Meta Data Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[sourcemetadata]
+			(
+				  SourceType
+				, SourceName
+				, SourceHeaderID
+				, SourceProcessorID
+				, ColumnDelimiter
+				, RowDelimiter
+				, ConnectionStringID
+				, ActiveFlag
+				, DataLevel
+				, ProviderID
+				, SourceFileExtension
+				, AdvertiserInFileName
+				, AdvertiserStartPos
+				, AdvertiserEndString
+				, CharacterSetCode
+				, CleanFlag
+				, FlexFile
+				, Production
+				, StatusDescription
+				, ModificationPath
+			)
+		'
+		SET @SQLSelect = 
+		'
+			--Source Meta Data Select
+			SELECT
+				  @ConnectionTypeFile		''SourceType''
+				, @SourceFileName			''SourceName''
+				, @SourceHeaderID			''SourceHeaderID''
+				, @ProcessorID				''SourceProcessorID''
+				, @ColumnDelimiter			''ColumnDelimiter''
+				, @RowDelimiter				''RowDelimiter''
+				, @Stage0ConnectionString	''ConnectionStringID''
+				, @True						''ActiveFlag''
+				, @DataLevel				''DataLevel''
+				, @ProviderID				''ProviderID''
+				, @SourceFileExtension		''SourceFileExtension''
+				, @False					''AdvertiserInFileName''
+				, null						''AdvertiserStartPos''
+				, null						''AdvertiserEndString''
+				, null						''CharacterSetCode''
+				, @True						''CleanFlag''
+				, @True					    ''FlexFile''
+				, @Production				''Production''
+				, @StatusDescription		''StatusDescription''
+				, @True						''ModificationPath''
+		'
+		
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ConnectionTypeFile VARCHAR(MAX)
+					   , @SourceFileName VARCHAR(MAX)
+					   , @SourceHeaderID BIGINT
+					   , @ProcessorID BIGINT
+					   , @ColumnDelimiter CHAR(1)
+					   , @RowDelimiter CHAR(10)
+					   , @Stage0ConnectionString BIGINT
+					   , @True BIT
+					   , @DataLevel VARCHAR(MAX)
+					   , @ProviderID BIGINT
+					   , @SourceFileExtension VARCHAR(MAX)
+					   , @False BIT
+					   , @Production CHAR(1)
+					   , @StatusDescription VARCHAR(MAX)'
+					, @ConnectionTypeFile = @ConnectionTypeFile
+					, @SourceFileName = @SourceFileName
+					, @SourceHeaderID = @SourceHeaderID
+					, @ProcessorID = @ProcessorID
+					, @ColumnDelimiter = @ColumnDelimiter
+					, @RowDelimiter = @RowDelimiter
+					, @Stage0ConnectionString = @Stage0ConnectionString
+					, @True = @True
+					, @DataLevel = @DataLevel
+					, @ProviderID = @ProviderID
+					, @SourceFileExtension = @SourceFileExtension
+					, @False = @False
+					, @Production = @Production
+					, @StatusDescription = @StatusDescription
+			END
+	END
+ELSE
+	SELECT 
+		  'Source Meta Data Record'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourcemetadata] 
+	WHERE sourceprocessorID = @ProcessorID 
+
+SET @SourceMetaDataID = 
+	(
+		SELECT ID 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourcemetadata] 
+		WHERE sourceprocessorID = @ProcessorID
+	)
+
+
+--Insert to SourceHeader
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+	WHERE sourcemetadataID = @SourceMetaDataID 
+)
+	BEGIN
+		SET @SQLInsert = 
+		'
+			--Source Header Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader]
+			(
+				  SourceMetaDataID
+				, ProviderID
+				, Header
+				, HeaderDelimiter
+				, RowsToSkip
+				, ActiveFlag 
+				, HeaderTemplate
+				, FooterStopValue
+				, ValueBeforeHeader
+				, UserID
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Source Header Select
+			SELECT
+				  @SourceMetaDataID		''SourceMetaDataID''
+				, @ProviderID			''ProviderID''
+				, @Header				''Header''
+				, @ColumnDelimiter		''HeaderDelimiter''
+				, @RowsToSkip			''RowsToSkip''
+				, @True					''ActiveFlag''
+				, null					''HeaderTemplate''
+				, @FooterStopValue		''FooterStopValue''
+				, @ValueBeforeHeader	''ValueBeforeHeader''
+				, @DmContactName		''UserID''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @SourceMetaDataID BIGINT
+					   , @ProviderID BIGINT
+					   , @Header VARCHAR(MAX)
+					   , @ColumnDelimiter CHAR(1)
+					   , @RowsToSkip INT
+					   , @True BIT
+					   , @FooterStopValue VARCHAR(MAX)
+					   , @ValueBeforeHeader VARCHAR(MAX)
+					   , @DmContactName VARCHAR(MAX)'
+					, @SourceMetaDataID = @SourceMetaDataID
+					, @ProviderID = @ProviderID
+					, @Header = @Header
+					, @ColumnDelimiter = @ColumnDelimiter
+					, @RowsToSkip = @RowsToSkip
+					, @True = @True
+					, @FooterStopValue = @FooterStopValue
+					, @ValueBeforeHeader = @ValueBeforeHeader
+					, @DmContactName = @DmContactName
+			END
+	END
+ELSE
+	SELECT 
+		  'Source Header Record'
+		, * 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+	WHERE sourcemetadataID = @SourceMetaDataID 
+
+SET @SourceHeaderID = 
+	(
+		SELECT ID 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+		WHERE sourcemetadataID = @SourceMetaDataID 
+	)
+
+
+--Update SourceMetaData with new SourceHeaderID
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+	
+IF EXISTS 
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourcemetadata] 
+	WHERE sourceprocessorID = @ProcessorID 
+	  AND SourceHeaderID is null
+)
+	BEGIN
+		IF EXISTS	
+			(
+				SELECT 1
+				FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourceHeader]
+				WHERE SourceMetaDataID = @SourceMetaDataID
+			)
+				BEGIN
+					SET @SQLUpdate =
+					'
+						--Set SourceHeaderID in SourceMetaData
+						UPDATE [HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData]
+						SET SourceHeaderID = 
+							(
+								SELECT ID 
+								FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+								WHERE sourcemetadataID = @SourceMetaDataID
+							)
+						WHERE ID = @SourceMetaDataID
+					'
+				END
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLUpdate
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLUpdate
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @SourceMetaDataID BIGINT'
+					, @SourceMetaDataID = @SourceMetaDataID
+			END
+	END
+ELSE
+	SELECT 
+		  'Linked Source MetaData Record (SourceHeaderID Updated in SourceMetaData)'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData] 
+	WHERE ID = @SourceMetaDataID
+
+
+
+
+
+--Step 5) Create Source Column Definitions
+/***************************************************************************************************/
+/*
+	Uses the column header variable to build the Column Definitions
+*/
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[sourceColumnDefinition] 
+	WHERE SourcemetadataID = @SourceMetaDataID
+)
+	BEGIN
+		IF EXISTS
+		(
+			SELECT 1
+			FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader]
+			WHERE ID = @SourceHeaderID
+		)
+			BEGIN
+				SET @ColumnLoopCounterStage0 = 
+				(
+					SELECT count(*) 
+					FROM [MetalAdmin].[dbo].fnStringSplit
+						(
+							(
+								SELECT Header 
+								FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+								WHERE ID = @SourceHeaderID
+							)
+							, @ColumnDelimiter
+						)
+				)
+		
+				SET @SQLInsert = 
+				'
+					--Source Column Definition Insert
+					INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition]
+					(
+						  SourceMetaDataID
+						, ColumnName
+						, ColumnDataType
+						, ColumnWidth
+						, ColumnOrder
+						, ColumnTextQualifier
+						, ActiveFlag
+						, CreateDate
+						, FlexColumn
+						, FlexColumnOrder
+					)
+				'
+				
+				--Build and EXECUTE sp_executesqlute Selects
+				WHILE @ColumnLoopCounterStage0 > 0
+					BEGIN
+						SET @ColumnOrderStage0 = @ColumnOrderStage0 + 1
+
+						SET @SQLSelect =
+						'
+							--Source Column Definition Select
+							SELECT 
+								  @SourceMetaDataID							''SourceMetaDataID''
+								, ''[''+replace
+										(
+											replace
+											(
+												replace
+												(
+													replace
+													(
+														  data
+														, @TextQualifier
+														, @EmptyString
+													)
+													, ''&''
+													, ''And''
+												)
+												, ''>'' 
+												, ''GT''
+											)
+											, ''<''
+											, ''LT''
+										) +'']'' 							''ColumnName''
+								, @Stage1DataType							''ColumnDataType''
+								, @Stage1ColumnWidth						''ColumnWidth''
+								, @ColumnOrderStage0						''ColumnOrder''
+								, @TextQualifier							''ColumnTextQualifier''
+								, @True										''ActiveFlag''
+								, @CreatedDate								''CreateDate''
+								, @True										''FlexColumn''
+								, null										''FlexColumnOrder''
+							FROM [MetalAdmin].[dbo].fnStringSplit
+								(
+									(
+										SELECT Header 
+										FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+										WHERE ID = @SourceHeaderID
+									)
+									,@ColumnDelimiter
+								) 
+							WHERE ID = @ColumnOrderStage0
+						'
+
+						IF @DebugFlag = 1
+							BEGIN
+								SET @SQL = @SQLInsert +  @SQLSelect
+								SELECT @SQL
+							END
+						ELSE
+							BEGIN
+								IF @ExecuteFlag = 1
+									BEGIN
+										SET @SQL = @SQLInsert +  @SQLSelect
+									END
+								ELSE
+									BEGIN
+										SET @SQL = @SQLSelect
+									END
+					
+								EXECUTE sp_executesql 
+									  @SQL
+									, N' @SourceMetaDataID BIGINT
+									   , @TextQualifier CHAR(1)
+									   , @EmptyString CHAR(1)
+									   , @Stage1DataType VARCHAR(MAX)
+									   , @Stage1ColumnWidth INT
+									   , @ColumnOrderStage0 INT
+									   , @True BIT
+									   , @SourceHeaderID BIGINT
+									   , @ColumnDelimiter CHAR(1)
+									   , @CreatedDate DATETIME'
+									, @SourceMetaDataID = @SourceMetaDataID
+									, @TextQualifier = @TextQualifier
+									, @EmptyString = @EmptyString
+									, @Stage1DataType = @Stage1DataType
+									, @Stage1ColumnWidth = @Stage1ColumnWidth
+									, @ColumnOrderStage0 = @ColumnOrderStage0
+									, @True = @True
+									, @SourceHeaderID = @SourceHeaderID
+									, @ColumnDelimiter = @ColumnDelimiter
+									, @CreatedDate = @CreatedDate
+							END
+					
+					SET @ColumnLoopCounterStage0 = @ColumnLoopCounterStage0 - 1
+					END
+			END
+		ELSE
+			SELECT 'MISSING SOURCE HEADER RECORD!!! COLUMN DEFINITIONS NOT CREATED!!!!'
+	END
+ELSE
+	SELECT 
+		  'Source Column Definitions'
+		, *
+	FROM HQDMOSQL04.MetalAdmin.dbo.sourcecolumndefinition 
+	WHERE sourcemetadataid = @SourceMetaDataID 
+	ORDER BY columnorder
+
+
+
+
+
+--Step 6) Create Destination Meta Data records
+/***************************************************************************************************/
+/*
+	Defines the Meta data configuration for the Stage 1 and Stage 2 destinations.
+*/
+
+--Insert Stage 1 INTo DestinationMetaData
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].dbo.destinationmetadata 
+	WHERE destinationprocessorid = @ProcessorID 
+	  AND DestinationStageID = @StageID1
+)
+	BEGIN
+		SET @SQLInsert = 
+		'
+			--Stage 1 Destination Meta Data Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData]
+			(
+				  DestinationStageID
+				, DestinationType
+				, DestinationName
+				, DestinationHeaderID
+				, DestinationProcessorID
+				, ColumnDelimiter
+				, RowDelimiter
+				, ConnectionStringID
+				, ActiveFlag
+				, GenericStaging
+				, ProviderID
+				, RefreshData
+				, RefreshRateInDays
+				, SpecialCodeID
+				, ReplaceData
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 1 Destination Meta Data Select
+			SELECT 
+				  @StageID1					 ''DestinationStageID''
+				, @ConnectionTypeTable		 ''DestinationType''
+				, @Stage1TableName			 ''DestinationName''
+				, null						 ''DestinationHeaderID''
+				, @ProcessorID				 ''DestinationProcessorID''
+				, @zero						 ''ColumnDelimiter''
+				, @Zero						 ''RowDelimiter''
+				, @Stage1ConnectionString	 ''ConnectionStringID''
+				, @True						 ''ActiveFlag''
+				, @False					 ''GenericStaging''
+				, @ProviderID				 ''ProviderID''
+				, @False					 ''RefreshData''
+				, @Zero						 ''RefreshRateInDays''
+				, @Zero						 ''SpecialCodeID''
+				, @False					 ''ReplaceData''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @StageID1 BIGINT
+					   , @ConnectionTypeTable VARCHAR(MAX)
+					   , @Stage1TableName VARCHAR(MAX)
+					   , @ProcessorID BIGINT
+				 	   , @Zero INT
+					   , @Stage1ConnectionString BIGINT
+					   , @True BIT
+					   , @False	BIT
+					   , @ProviderID BIGINT'
+					, @StageID1 = @StageID1
+					, @ConnectionTypeTable = @ConnectionTypeTable
+					, @Stage1TableName = @Stage1TableName
+					, @ProcessorID = @ProcessorID
+				 	, @Zero = @Zero
+					, @Stage1ConnectionString = @Stage1ConnectionString
+					, @True = @True
+					, @False = @False
+					, @ProviderID = @ProviderID
+			END 
+	END
+ELSE
+	SELECT 
+		  'Destination Meta Data Stage 1'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].dbo.destinationmetadata 
+	WHERE destinationprocessorid = @ProcessorID 
+	  AND DestinationStageID = @StageID1
+
+SET @DestinationMetaDataIDStage1 = 
+	(
+		SELECT id 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[destinationmetadata] 
+		WHERE destinationprocessorid = @ProcessorID 
+		  AND DestinationStageID = @StageID1
+	)
+
+--Insert Stage 2 INTo DestinationMetaData
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[destinationmetadata] 
+	WHERE destinationprocessorid = @ProcessorID 
+	  AND DestinationStageID = @StageID2
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Stage 2 Destination Meta Data Insert
+			INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData]
+			(
+				  DestinationStageID
+				, DestinationType
+				, DestinationName
+				, DestinationHeaderID
+				, DestinationProcessorID
+				, ColumnDelimiter
+				, RowDelimiter
+				, ConnectionStringID
+				, ActiveFlag
+				, GenericStaging
+				, ProviderID
+				, RefreshData
+				, RefreshRateInDays
+				, SpecialCodeID
+				, ReplaceData
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 2 Destination Meta Data Select
+			SELECT 
+				  @StageID2					''DestinationStageID''
+				, @ConnectionTypeTable		''DestinationType''
+				, @Stage2TableName			''DestinationName''
+				, null						''DestinationHeaderID''
+				, @ProcessorID				''DestinationProcessorID''
+				, @zero						''ColumnDelimiter''
+				, @Zero						''RowDelimiter''
+				, @Stage2ConnectionString	''ConnectionStringID''
+				, @True						''ActiveFlag''
+				, @False					''GenericStaging''
+				, @ProviderID				''ProviderID''
+				, @RefreshData				''RefreshData''
+				, @RefreshRateInDays		''RefreshRateInDays''
+				, @SpecialCodeID			''SpecialCodeID''
+				, @ReplaceData				''ReplaceData''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @StageID2 BIGINT
+					   , @ConnectionTypeTable VARCHAR(MAX)
+					   , @Stage2TableName VARCHAR(MAX)
+					   , @ProcessorID BIGINT
+					   , @Zero INT
+					   , @Stage2ConnectionString BIGINT
+					   , @True BIT
+					   , @False BIT
+					   , @ProviderID BIGINT
+					   , @RefreshData BIT
+					   , @RefreshRateInDays INT
+					   , @SpecialCodeID INT
+					   , @ReplaceData BIT'
+					, @StageID2	= @StageID2
+					, @ConnectionTypeTable = @ConnectionTypeTable
+					, @Stage2TableName = @Stage2TableName
+					, @ProcessorID = @ProcessorID
+					, @Zero = @Zero
+					, @Stage2ConnectionString = @Stage2ConnectionString
+					, @True = @True
+					, @False = @False
+					, @ProviderID = @ProviderID
+					, @RefreshData = @RefreshData
+					, @RefreshRateInDays = @RefreshRateInDays
+					, @SpecialCodeID = @SpecialCodeID
+					, @ReplaceData = @ReplaceData
+			END
+	END
+ELSE
+	SELECT 
+		  'Destination Meta Data Stage 2'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[destinationmetadata] 
+	WHERE destinationprocessorid = @ProcessorID 
+	  AND DestinationStageID = @StageID2
+
+SET @DestinationMetaDataIDStage2 = 
+	(
+		SELECT id 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[destinationmetadata] 
+		WHERE destinationprocessorid = @ProcessorID 
+		  AND DestinationStageID = @StageID2
+	)
+
+
+--update [HQIMPETL01].[ExstoAdmin].[DBO].[Destinationmetadata] 
+--set AdvertiserIncluded = 1
+--where DestinationProcessorID = 2195
+
+
+
+--Step 7) Create Stage 1 Destination Column Definitions
+/***************************************************************************************************/
+/*
+	This should match your source column definitions but you will also need to add columns for	
+	ControlID(BIGINT), LoadDateTime(datetime).  Be sure to set FileColumnOrder to be 0 
+	for these additional columns, as they are not actualy in the file.
+*/
+--Create Destination Column Definition Records
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[destinationColumnDefinition] 
+	WHERE destinationmetadataID = @DestinationMetaDataIDStage1 
+	  AND DestinationStageID = @StageID1
+)
+	BEGIN
+		IF EXISTS
+		(
+			SELECT 1
+			FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader]
+			WHERE ID = @SourceHeaderID
+		)
+			BEGIN
+				SET @ColumnLoopCounterStage1 = 
+					(
+						SELECT count(*) 
+						FROM [MetalAdmin].[dbo].fnStringSplit
+							(
+								(
+									SELECT Header 
+									FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+									WHERE ID = @SourceHeaderID
+								)
+								,@ColumnDelimiter
+							)
+					)
+		
+				SET @SQLInsert =
+				'
+					--Destination Column Definitions Insert
+					INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+					(
+						  DestinationMetaDataID
+						, ColumnName
+						, ColumnDataType
+						, ColumnOrder
+						, ColumnTextQualifier
+						, ActiveFlag
+						, FileColumnOrder
+						, DestinationStageID
+					)
+				'
+
+				WHILE @ColumnLoopCounterStage1 > 0
+					BEGIN
+						SET @ColumnOrderStage1 = @ColumnOrderStage1 + 1
+
+						SET @SQLSelect =
+						'
+							--Destination Column Definitions Select
+							SELECT 
+								  @DestinationMetaDataIDStage1													''DestinationMetaDataID''
+								, ''[''+replace
+										(
+											replace
+											(
+												replace
+												(
+													replace
+													(
+														data
+														, @TextQualifier
+														, @EmptyString
+													)
+													, ''&''
+													, ''And''
+												)
+												, ''>''
+												, ''GT''
+											)
+											, ''<''
+											, ''LT''
+										) +'']''																''ColumnName''
+								, @Stage1DestinationDataType + ''(''+cast(@Stage1ColumnWidth as VARCHAR) +'')''	''ColumnDataType''
+								, @ColumnOrderStage1															''ColumnOrder''
+								, @TextQualifier																''ColumnTextQualifier''
+								, @True																			''ActiveFlag''
+								, @ColumnOrderStage1															''FileColumnOrder''
+								, @StageID1																		''DestinationStageID''
+							FROM [MetalAdmin].[dbo].fnStringSplit
+								(
+									(
+										SELECT Header 
+										FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceHeader] 
+										WHERE ID = @SourceHeaderID
+									)
+									,@ColumnDelimiter
+								) 
+							WHERE ID = @ColumnOrderStage1
+						'
+				
+						IF @DebugFlag = 1
+							BEGIN
+								SET @SQL = @SQLInsert +  @SQLSelect
+								SELECT @SQL
+							END
+						ELSE
+							BEGIN
+								IF @ExecuteFlag = 1
+									BEGIN
+										SET @SQL = @SQLInsert +  @SQLSelect
+									END
+								ELSE
+									BEGIN
+										SET @SQL = @SQLSelect
+									END
+					
+								EXECUTE sp_executesql 
+									  @SQL
+									, N' @DestinationMetaDataIDStage1 BIGINT
+									   , @TextQualifier CHAR(1)
+									   , @EmptyString CHAR(1)
+									   , @Stage1DestinationDataType VARCHAR(MAX)
+									   , @Stage1ColumnWidth INT
+									   , @ColumnOrderStage1 INT
+									   , @True BIT
+									   , @StageID1 INT
+									   , @SourceHeaderID BIGINT
+									   , @ColumnDelimiter CHAR(1)'
+									, @DestinationMetaDataIDStage1 = @DestinationMetaDataIDStage1
+									, @TextQualifier = @TextQualifier
+									, @EmptyString = @EmptyString
+									, @Stage1DestinationDataType = @Stage1DestinationDataType
+									, @Stage1ColumnWidth = @Stage1ColumnWidth
+									, @ColumnOrderStage1 = @ColumnOrderStage1
+									, @True = @True
+									, @StageID1 = @StageID1
+									, @SourceHeaderID = @SourceHeaderID
+									, @ColumnDelimiter = @ColumnDelimiter
+							END
+						SET @ColumnLoopCounterStage1 = @ColumnLoopCounterStage1 - 1
+					END	
+			END
+
+		--Add record for ControlID
+		EXECUTE sp_executesql 
+			  @ResetSQL
+			, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+			  , @SQLSelect NVARCHAR(MAX) OUTPUT
+			  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+			  , @SQL NVARCHAR(MAX) OUTPUT'
+			, @SQLInsert = @SQLInsert OUTPUT
+			, @SQLSelect = @SQLSelect OUTPUT
+			, @SQLUpdate = @SQLUpdate OUTPUT
+			, @SQL = @SQL OUTPUT
+			
+		IF NOT EXISTS
+		(
+			SELECT 1 
+			FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+			WHERE destinationmetadataID = @DestinationMetaDataIDStage1 
+			  AND DestinationStageID = @StageID1 
+			  AND columnname = '[ControlID]'
+		)
+			BEGIN
+				SET @SQLInsert = 
+				'
+					--Control ID Insert
+					INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+					(
+						  DestinationMetaDataID
+						, ColumnName
+						, ColumnDataType
+						, ColumnOrder
+						, ColumnTextQualifier
+						, ActiveFlag
+						, FileColumnOrder
+						, DestinationStageID
+					)
+				'
+
+				SET @SQLSelect =
+				'
+					--Control ID Select
+					SELECT 
+						  @DestinationMetaDataIDStage1											''DestinationMetaDataID''
+						, ''[ControlID]''														''ColumnName''
+						, ''[BIGINT]''															''ColumnDataType''
+						, (																		
+							SELECT MAX(columnorder) +1 											
+							FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 	
+							WHERE destinationmetadataID = @DestinationMetaDataIDStage1 			
+							  AND DestinationStageID = @StageID1								
+						  )																		''ColumnOrder''
+						, @TextQualifier														''ColumnTextQualifier''
+						, @True																	''ActiveFlag''
+						, @zero																	''FileColumnOrder''
+						, @StageID1																''DestinationStageID''
+				'
+
+				IF @DebugFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+						SELECT @SQL
+					END
+				ELSE
+					BEGIN
+						IF @ExecuteFlag = 1
+							BEGIN
+								SET @SQL = @SQLInsert +  @SQLSelect
+							END
+						ELSE
+							BEGIN
+								SET @SQL = @SQLSelect
+							END
+					
+						EXECUTE sp_executesql 
+							  @SQL
+							, N' @DestinationMetaDataIDStage1 BIGINT
+							   , @StageID1 BIGINT
+							   , @TextQualifier CHAR(1)
+							   , @True BIT
+							   , @Zero INT'
+							, @DestinationMetaDataIDStage1 = @DestinationMetaDataIDStage1
+							, @StageID1 = @StageID1
+							, @TextQualifier = @TextQualifier
+							, @True = @True
+							, @Zero = @Zero
+					END
+			END
+		
+		--Add Record for LoadDateTime
+		EXECUTE sp_executesql 
+			  @ResetSQL
+			, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+			  , @SQLSelect NVARCHAR(MAX) OUTPUT
+			  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+			  , @SQL NVARCHAR(MAX) OUTPUT'
+			, @SQLInsert = @SQLInsert OUTPUT
+			, @SQLSelect = @SQLSelect OUTPUT
+			, @SQLUpdate = @SQLUpdate OUTPUT
+			, @SQL = @SQL OUTPUT
+
+		IF NOT EXISTS
+		(
+			SELECT 1
+			FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+			WHERE destinationmetadataID = @DestinationMetaDataIDStage1 
+			  AND DestinationStageID = @StageID1 
+			  AND columnname = '[LoadDateTime]'
+		)
+			BEGIN
+				SET @SQLInsert =
+				'
+					--Load Date Time Insert
+					INSERT INTO [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+					(
+						  DestinationMetaDataID
+						, ColumnName
+						, ColumnDataType
+						, ColumnOrder
+						, ColumnTextQualifier
+						, ActiveFlag
+						, FileColumnOrder
+						, DestinationStageID
+					)
+				'
+
+				SET @SQLSelect =
+				'
+					--Load Date Time Select
+					SELECT 
+						  @DestinationMetaDataIDStage1											''DestinationMetaDataID''
+						, ''[LoadDateTime]''													''ColumnName''
+						, ''[Datetime]''														''ColumnDataType''
+						, (																		
+							SELECT MAX(columnorder) +1 											
+							FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 	
+							WHERE destinationmetadataID = @DestinationMetaDataIDStage1 			
+							  AND DestinationStageID = @StageID1								
+						  )																		''ColumnOrder''
+						, @TextQualifier														''ColumnTextQualifier''
+						, @True																	''ActiveFlag''
+						, @zero																	''FileColumnOrder''
+						, @StageID1																''DestinationStageID''
+				'
+		
+				IF @DebugFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+						SELECT @SQL
+					END
+				ELSE
+					BEGIN
+						IF @ExecuteFlag = 1
+							BEGIN
+								SET @SQL = @SQLInsert +  @SQLSelect
+							END
+						ELSE
+							BEGIN
+								SET @SQL = @SQLSelect
+							END
+					
+						EXECUTE sp_executesql 
+							  @SQL
+							, N' @DestinationMetaDataIDStage1 BIGINT
+							   , @StageID1 BIGINT
+							   , @TextQualifier CHAR(1)
+							   , @True BIT
+							   , @Zero INT'
+							, @DestinationMetaDataIDStage1 = @DestinationMetaDataIDStage1
+							, @StageID1 = @StageID1
+							, @TextQualifier = @TextQualifier
+							, @True = @True
+							, @Zero = @Zero
+					END
+			END
+	
+	END
+ELSE
+	SELECT 
+		  'Destination Column Definitions Stage 1'
+		, * 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[Destinationcolumndefinition] 
+	WHERE destinationmetadataid = @DestinationMetaDataIDStage1 
+	ORDER BY columnorder
+
+
+
+
+
+--Step 8) Create Client Metal Assignment and Client Metal Schedule Records
+/***************************************************************************************************/
+/*
+	These records drive when the files are picked up by the package and processed. 
+	Client Metal Assignment creates the Assignment record, which says that this advertiser ID should be processed for this Processor ID.
+	Client Metal Schedule creates the Schedule record, which says what day/time the package should start processing the file.
+*/
+--Create Client Metal Assignment Stage 1
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS
+(
+	SELECT 1
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+	WHERE processorid = @ProcessorID 
+	  AND clientparentID = @ClientParentID 
+	  AND ProviderID = @ProviderID 
+	  AND advertiserID = @AdvertiserID 
+	  AND DestinationStageID = @StageID1
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Stage 1 Client Metal Assignment Insert
+			INSERT INTO	[HQDMOSQL04].[MetalAdmin].[DBO].[CLIENTMETALASSIGNMENT]
+			(
+				  ProcessorID
+				, DestinationStageID
+				, DestinationName
+				, ClientParentID
+				, ClientParentName
+				, AdvertiserID
+				, ProviderID
+				, ActiveFlag
+				, CreateDateTime
+				, UserID
+				, DCTPrimaryProviderFlag
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 1 Client Metal Assignment Select
+			SELECT 
+				  @ProcessorID		''ProcessorID''
+				, @StageID1			''DestinationStageID''
+				, @Stage1TableName	''DestinationName''
+				, @ClientParentID	''ClientParentID''
+				, @ClientName		''ClientParentName''
+				, @AdvertiserID		''AdvertiserID''
+				, @ProviderID		''ProviderID''
+				, @True				''ActiveFlag''
+				, @CreatedDate		''CreateDateTime''
+				, @DmContactName	''UserID''
+				, @False			''DCTPrimaryProviderFlag''
+		'
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ProcessorID BIGINT
+					   , @StageID1 INT
+					   , @Stage1TableName VARCHAR(MAX)
+					   , @ClientParentID BIGINT
+					   , @ClientName VARCHAR(MAX)
+					   , @AdvertiserID BIGINT
+					   , @ProviderID BIGINT
+					   , @True BIT
+					   , @CreatedDate DATETIME
+					   , @DmContactName VARCHAR(MAX)
+					   , @False BIT'
+					, @ProcessorID = @ProcessorID
+					, @StageID1 = @StageID1
+					, @Stage1TableName = @Stage1TableName
+					, @ClientParentID = @ClientParentID
+					, @ClientName = @ClientName
+					, @AdvertiserID = @AdvertiserID
+					, @ProviderID = @ProviderID
+					, @True  = @True
+					, @CreatedDate = @CreatedDate
+					, @DmContactName = @DmContactName
+					, @False = @False
+			END
+	END
+ELSE
+	SELECT 
+		  'Client Metal Assignment Stage 1'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+	WHERE processorid = @ProcessorID 
+	  AND clientparentID = @ClientParentID 
+	  AND ProviderID = @ProviderID 
+	  AND advertiserID = @AdvertiserID 
+	  AND DestinationStageID = @StageID1
+
+SET @CMAIDStage1 = 
+	(
+		SELECT CMAID 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+		WHERE processorid = @ProcessorID 
+		  AND clientparentID = @ClientParentID 
+		  AND ProviderID = @ProviderID 
+		  AND advertiserID = @AdvertiserID 
+		  AND DestinationStageID = @StageID1
+	)
+
+--Create Client Metal Assignment Stage 2
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+	WHERE processorid = @ProcessorID 
+	  AND clientparentID = @ClientParentID 
+	  AND ProviderID = @ProviderID 
+	  AND advertiserID = @AdvertiserID 
+	  AND DestinationStageID = @StageID2
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Stage 2 Client Metal Assignment Insert
+			INSERT INTO	[HQDMOSQL04].[MetalAdmin].[DBO].[CLIENTMETALASSIGNMENT]
+			(
+				  ProcessorID
+				, DestinationStageID
+				, DestinationName
+				, ClientParentID
+				, ClientParentName
+				, AdvertiserID
+				, ProviderID
+				, ActiveFlag
+				, CreateDateTime
+				, UserID
+				, DCTPrimaryProviderFlag
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 2 Client Metal Assignment Select
+			SELECT 
+				  @ProcessorID		''ProcessorID''
+				, @StageID2			''DestinationStageID''
+				, @Stage2TableName	''DestinationName''
+				, @ClientParentID	''ClientParentID''
+				, @ClientName		''ClientParentName''
+				, @AdvertiserID		''AdvertiserID''
+				, @ProviderID		''ProviderID''
+				, @False			''ActiveFlag''
+				, @CreatedDate		''CreateDateTime''
+				, @DmContactName	''UserID''
+				, @False			''DCTPrimaryProviderFlag''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @ProcessorID BIGINT
+					   , @StageID2 INT
+					   , @Stage2TableName VARCHAR(MAX)
+					   , @ClientParentID BIGINT
+					   , @ClientName VARCHAR(MAX)
+					   , @AdvertiserID BIGINT
+					   , @ProviderID BIGINT
+					   , @True BIT
+					   , @CreatedDate DATETIME
+					   , @DmContactName VARCHAR(MAX)
+					   , @False BIT'
+					, @ProcessorID = @ProcessorID
+					, @StageID2 = @StageID2
+					, @Stage2TableName = @Stage2TableName
+					, @ClientParentID = @ClientParentID
+					, @ClientName = @ClientName
+					, @AdvertiserID = @AdvertiserID
+					, @ProviderID = @ProviderID
+					, @True  = @True
+					, @CreatedDate = @CreatedDate
+					, @DmContactName = @DmContactName
+					, @False = @False
+			END
+	END
+ELSE	
+	SELECT 
+		  'Client Metal Assignment Stage 2'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+	WHERE processorid = @ProcessorID 
+	  AND clientparentID = @ClientParentID 
+	  AND ProviderID = @ProviderID 
+	  AND advertiserID = @AdvertiserID 
+	  AND DestinationStageID = @StageID2
+
+SET @CMAIDStage2 = 
+	(
+		SELECT CMAID 
+		FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientmetalassignment] 
+		WHERE processorid = @ProcessorID 
+		  AND clientparentID = @ClientParentID 
+		  AND ProviderID = @ProviderID 
+		  AND advertiserID = @AdvertiserID 
+		  AND DestinationStageID = @StageID2
+	)
+
+--Create Client Metal Schedule Stage 1
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientMetalSchedule] 
+	WHERE CMAID = @CMAIDStage1
+)
+	BEGIN
+		SET @SQLInsert =
+		'
+			--Stage 1 Client Metal Schedule Insert
+			INSERT INTO	[HQDMOSQL04].[MetalAdmin].[DBO].[CLIENTMETALSCHEDULE]
+			(
+				  CMAID
+				, SundayRunTime
+				, MondayRunTime
+				, TuesdayRunTime
+				, WednesdayRunTime
+				, ThursdayRunTime
+				, FridayRunTime
+				, SaturdayRunTime
+				, PrioritySeq
+				, BatchID
+				, ActiveFlag
+				, CreateDateTime
+				, UserID
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 1 Client Metal Schedule Select
+			SELECT 
+				  @CMAIDStage1				''CMAID''
+				, @SundayScheduleTime		''SundayRunTime''
+				, @MondayScheduleTime		''MondayRunTime''
+				, @TuesdayScheduleTime		''TuesdayRunTime''
+				, @WednesdayScheduleTime	''WednesdayRunTime''
+				, @ThursdayScheduleTime		''ThursdayRunTime''
+				, @FridayScheduleTime		''FridayRunTime''
+				, @SaturdayScheduleTime		''SaturdayRunTime''
+				, @PrioritySeq				''PrioritySeq''
+				, @BatchID					''BatchID''
+				, @True						''ActiveFlag''
+				, @CreatedDate				''CreateDateTime''
+				, @DmContactName			''UserID''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @CMAIDStage1 BIGINT
+					   , @SundayScheduleTime VARCHAR(MAX)
+					   , @MondayScheduleTime VARCHAR(MAX)
+					   , @TuesdayScheduleTime VARCHAR(MAX)
+					   , @WednesdayScheduleTime VARCHAR(MAX)
+					   , @ThursdayScheduleTime VARCHAR(MAX)
+					   , @FridayScheduleTime VARCHAR(MAX)
+					   , @SaturdayScheduleTime VARCHAR(MAX)
+					   , @PrioritySeq INT
+					   , @BatchID INT
+					   , @True BIT
+					   , @CreatedDate DATETIME
+					   , @DmContactName VARCHAR(MAX)'
+					, @CMAIDStage1 = @CMAIDStage1
+					, @SundayScheduleTime = @SundayScheduleTime
+					, @MondayScheduleTime = @MondayScheduleTime
+					, @TuesdayScheduleTime = @TuesdayScheduleTime
+					, @WednesdayScheduleTime = @WednesdayScheduleTime
+					, @ThursdayScheduleTime = @ThursdayScheduleTime
+					, @FridayScheduleTime = @FridayScheduleTime
+					, @SaturdayScheduleTime = @SaturdayScheduleTime
+					, @PrioritySeq = @PrioritySeq
+					, @BatchID = @BatchID
+					, @True = @True
+					, @CreatedDate = @CreatedDate
+					, @DmContactName = @DmContactName
+			END
+	END
+ELSE
+	SELECT 
+		  'Client Metal Schedule Stage 1'
+		, * 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientMetalSchedule] 
+	WHERE CMAID = @CMAIDStage1
+
+--Create Client Metal Schedule Stage 2
+EXECUTE sp_executesql 
+	  @ResetSQL
+	, N'@SQLInsert NVARCHAR(MAX) OUTPUT
+	  , @SQLSelect NVARCHAR(MAX) OUTPUT
+	  , @SQLUpdate NVARCHAR(MAX) OUTPUT
+	  , @SQL NVARCHAR(MAX) OUTPUT'
+	, @SQLInsert = @SQLInsert OUTPUT
+	, @SQLSelect = @SQLSelect OUTPUT
+	, @SQLUpdate = @SQLUpdate OUTPUT
+	, @SQL = @SQL OUTPUT
+
+IF NOT EXISTS 
+(
+	SELECT 1 
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientMetalSchedule]
+	WHERE CMAID = @CMAIDStage2
+)
+	BEGIN
+		SET @SQLInsert = 
+		'
+			--Stage 2 Client Metal Schedule Insert
+			INSERT INTO	[HQDMOSQL04].[MetalAdmin].[DBO].[CLIENTMETALSCHEDULE]
+			(
+				  CMAID
+				, SundayRunTime
+				, MondayRunTime
+				, TuesdayRunTime
+				, WednesdayRunTime
+				, ThursdayRunTime
+				, FridayRunTime
+				, SaturdayRunTime
+				, PrioritySeq
+				, BatchID
+				, ActiveFlag
+				, CreateDateTime
+				, UserID
+			)
+		'
+
+		SET @SQLSelect =
+		'
+			--Stage 2 Client Metal Schedule Select
+			SELECT 
+				  @CMAIDStage2				''CMAID''
+				, @SundayScheduleTime		''SundayRunTime''
+				, @MondayScheduleTime		''MondayRunTime''
+				, @TuesdayScheduleTime		''TuesdayRunTime''
+				, @WednesdayScheduleTime	''WednesdayRunTime''
+				, @ThursdayScheduleTime		''ThursdayRunTime''
+				, @FridayScheduleTime		''FridayRunTime''
+				, @SaturdayScheduleTime		''SaturdayRunTime''
+				, @PrioritySeq				''PrioritySeq''
+				, @BatchID					''BatchID''
+				, @True						''ActiveFlag''
+				, @CreatedDate				''CreateDateTime''
+				, @DmContactName			''UserID''
+		'
+
+		IF @DebugFlag = 1
+			BEGIN
+				SET @SQL = @SQLInsert +  @SQLSelect
+				SELECT @SQL
+			END
+		ELSE
+			BEGIN
+				IF @ExecuteFlag = 1
+					BEGIN
+						SET @SQL = @SQLInsert +  @SQLSelect
+					END
+				ELSE
+					BEGIN
+						SET @SQL = @SQLSelect
+					END
+					
+				EXECUTE sp_executesql 
+					  @SQL
+					, N' @CMAIDStage2 BIGINT
+					   , @SundayScheduleTime VARCHAR(MAX)
+					   , @MondayScheduleTime VARCHAR(MAX)
+					   , @TuesdayScheduleTime VARCHAR(MAX)
+					   , @WednesdayScheduleTime VARCHAR(MAX)
+					   , @ThursdayScheduleTime VARCHAR(MAX)
+					   , @FridayScheduleTime VARCHAR(MAX)
+					   , @SaturdayScheduleTime VARCHAR(MAX)
+					   , @PrioritySeq INT
+					   , @BatchID INT
+					   , @True BIT
+					   , @CreatedDate DATETIME
+					   , @DmContactName VARCHAR(MAX)'
+					, @CMAIDStage2 = @CMAIDStage2
+					, @SundayScheduleTime = @SundayScheduleTime
+					, @MondayScheduleTime = @MondayScheduleTime
+					, @TuesdayScheduleTime = @TuesdayScheduleTime
+					, @WednesdayScheduleTime = @WednesdayScheduleTime
+					, @ThursdayScheduleTime = @ThursdayScheduleTime
+					, @FridayScheduleTime = @FridayScheduleTime
+					, @SaturdayScheduleTime = @SaturdayScheduleTime
+					, @PrioritySeq = @PrioritySeq
+					, @BatchID = @BatchID
+					, @True = @True
+					, @CreatedDate = @CreatedDate
+					, @DmContactName = @DmContactName
+			END
+	END
+ELSE
+	SELECT 
+		  'Client Metal Schedule Stage 2'
+		, *
+	FROM [HQDMOSQL04].[MetalAdmin].[dbo].[clientMetalSchedule] 
+	WHERE CMAID = @CMAIDStage2
+
+
+update [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment]
+set ActiveFlag = 1
+where ProcessorID = @ProcessorID
+
+
+update [HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalSchedule] 
+set ActiveFlag = 0
+where cmaid in (
+    select cmaid 
+    from [HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalAssignment] 
+    where ProcessorID = @ProcessorID
+    )
+    
+update [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+set ColumnDatatype = '[VARCHAR](8000)'
+where ColumnName in ('[U Value]'
+,'[DBM URL]'
+,'[Referrer URL]'
+,'[TRAN Value]'
+,'[Other Data]'
+,'[DBM Matching Targeted Segments]')
+and DestinationMetaDataID = @DestinationMetaDataIDStage1
+
+update [HQDMOSQL04].[MetalAdmin].[dbo].[sourceColumnDefinition]
+set ColumnWidth = '8000'
+where ColumnName in ('[U Value]'
+,'[DBM URL]'
+,'[Referrer URL]'
+,'[TRAN Value]'
+,'[Other Data]'
+,'[DBM Matching Targeted Segments]')
+and SourceMetaDataID = @SourceMetaDataID
+/*
+ Grab Email Info for the Unloader Task
+=========================================================================================================
+I generally will grab some info from the emails (If the file is being provided through emails) for the 
+unloader setup, and make note of them in this section.
+*/
+
+--Provider Name Opera
+
+--EMAIL SUBJECT LINE
+--Opera_HBONow_Daily Report_YYYY-MM-DD
+
+--FILE NAMING CONVENTION
+--Opera_HBONow_Daily Report_YYYY-MM-DD
+
+
+
+/*
+ Set up the Unloader Task/Provider Destination Folders
+=========================================================================================================
+Now, set up the Provider destination folders, and the unloader task.  Provider folders should be created
+on HQDMOSQL03 in this directory(just copy an existing directory and rename it/delete the processed files): 
+\\hqdmosql03\landing\ExstoDisplay\
+
+If the provider folder exists, just use it (Need a folder for Processed Files, Format Files, and error 
+files.
+
+Path to the Unloader INTerface is here (Yellow Highlighted Fields are most important):
+http://3wi-pens/APICOMMON/DownloadProcessingTasks.cfm?SourceID=283&ShowDetails=Y&followStepsSuccess=Y&StatusToCheck=X&datasource=geno_exsto
+
+Path to the Unloader Spreadsheet is here:
+\\pititfp01\general_data\Datamanagement\Conversion Processing Information\Conversion Reports Email Information.xls
+*/
