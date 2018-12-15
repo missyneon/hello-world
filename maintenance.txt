@@ -1,0 +1,223 @@
+
+DECLARE  @procID int =   2900 --2838 /* Enter ProcessorID e.g 2181*/
+        ,@Control_ID int =   5831074 /* For Stage 1 errors, enter ControlID e.g. 3639296 and set @aprocessControlID to NULL */
+        ,@aprocessControlID int = NULL --1849237 /* For Stage 2 errors, enter ProcessControlID e.g. 468413 and set @Control_ID to NULL*/
+        ,@debugFlag int = 0             /* Enter 0 for debug mode, 1 for execute mode */
+		,@Stage1 int = 1
+        ,@Stage2 int = 2
+		,@True int = 1
+        ,@False int = 2
+
+
+
+DECLARE 
+    @SQL nvarchar(max)
+   ,@SQLStage1 nvarchar(max)
+   ,@SQLdtn nvarchar(max)
+   ,@SQLStage2 nvarchar(max)
+   ,@TempStagingTableInfo nvarchar(max)
+   ,@ClientParentID int
+   ,@ProviderID int
+   ,@SourceServer nvarchar(max)
+   ,@DestinationServer nvarchar(max)
+   ,@SourceDatabase nvarchar(max)
+   ,@DestinationDatabase nvarchar(max)
+   ,@SourceTableName nvarchar(max)
+   ,@DestinationTableName nvarchar(max)
+   ,@TotaltempColumns int
+
+
+/*ClientMetalAssignment records */
+select '[ClientMetalAssignment]',* from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] where processorid = @procID
+order by DestinationStageID
+
+
+/*ClientMetalSchedule records*/
+select '[ClientMetalSchedule]',* from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalSchedule] where cmaid in (select cmaid from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] where ProcessorID = @ProcID)
+
+
+/*all adownload_Control records with X */
+select '[all adownload_Control with X]' as [all adownload_Control with X],status,* from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] where processor_ID = @procID
+and status = 'X'
+order by stamp_created desc
+
+
+/*Adownload record with ART error*/
+select '[adownload_Control with Control_ID]' as [adownload_Control with Control_ID],status,* from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] 
+where processor_ID = @procID 
+and Control_ID IN (CASE WHEN @Control_ID IS NOT NULL THEN @Control_ID ELSE (SELECT FileControlID from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where processcontrolID = @aprocessControlID) END)
+
+
+/*Duplicate/multiple Adownload records with same filename */
+select '[adownload_Control with same filename]',status,* from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] where 
+Filename_Attachment in (select Filename_Attachment from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] where Control_ID IN (CASE WHEN @Control_ID IS NOT NULL THEN @Control_ID ELSE (SELECT FileControlID from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where processcontrolID = @aprocessControlID) END))
+and Filename_Data in (select Filename_Data from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] where Control_ID IN (CASE WHEN @Control_ID IS NOT NULL THEN @Control_ID ELSE (SELECT FileControlID from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where processcontrolID = @aprocessControlID) END))
+order by stamp_created asc
+
+
+/*Aprocess record with ART error */
+select '[aprocess_Control search with controlID]' as [aprocess_Control], status, * from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] 
+where FileControlID IN (CASE WHEN @Control_ID IS NOT NULL THEN @Control_ID ELSE (SELECT FileControlID from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where processcontrolID = @aprocessControlID) END)
+
+
+
+/* construct tempStagingInfo table name e.g. tempstagingTableInfo_209369pclcosmojekwu....*/
+SET @TempStagingTableInfo = 'tempdb.dbo.StagingTableInfo_' + CONVERT(VARCHAR(10), @procID)+ REPLACE(SESSION_USER, '\', '')
+
+
+/*Create temp table with ClientParentID, ProviderID, Servername, Databasename, and tablename*/
+SET @SQL = 
+    ' 
+        IF OBJECT_ID('''+@TempStagingTableInfo+''', ''U'') IS NOT NULL
+            DROP TABLE ' + @TempStagingTableInfo + '
+
+        CREATE TABLE '+@TempStagingTableInfo+'
+        ( 
+             ID INT IDENTITY (1,1)
+            ,ClientParentID int
+            ,ProviderID int
+            ,Stage1DestinationServername nvarchar(100)
+            ,Stage2DestinationServername nvarchar(100)
+            ,Stage1DestinationDatabasename nvarchar(100)
+            ,Stage2DestinationDatabasename nvarchar(100)
+            ,Stage1DestinationTablename nvarchar(100)
+            ,Stage2DestinationTablename nvarchar(100)
+        ) 
+    '
+EXEC (@SQL)
+
+
+/*Populate TempStagingTableInfo temp table with table info values from procID */
+SET @SQL = 
+    ' 
+      INSERT INTO '+@TempStagingTableInfo+'
+      (
+             ClientParentID
+            ,ProviderID
+            ,Stage1DestinationServername
+            ,Stage2DestinationServername
+            ,Stage1DestinationDatabasename
+            ,Stage2DestinationDatabasename
+            ,Stage1DestinationTablename
+            ,Stage2DestinationTablename
+       )
+      SELECT DISTINCT cma.ClientParentID
+                    , cma.ProviderID
+                    , ges.SourceServer
+                    , ges.DestinationServer
+                    , ges.SourceDatabase
+                    , ges.DestinationDatabase
+                    , ges.SourceTableName
+                    , ges.DestinationTableName 
+      FROM [HQDMOSQL04].[MetalAdmin].[DBO].[GenericETLConnectionStrings] ges
+      INNER JOIN [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] cma on ges.Processor_ID = cma.ProcessorID
+      where ges.Processor_ID = '+CONVERT(NVARCHAR(10),@procID)+' and ges.DestinationStageID = '+CONVERT(NVARCHAR(10),@Stage2)+'
+
+      SET @TotaltempColumns = (select count(*) from '+@TempStagingTableInfo+' )
+      
+    '
+
+EXECUTE sp_executesql 
+			  @SQL
+			, N' @TotaltempColumns int OUTPUT'
+			    ,@TotaltempColumns = @TotaltempColumns OUTPUT
+
+IF @DebugFlag = 1      
+BEGIN          
+ SELECT '@TotaltempColumns',@TotaltempColumns
+ SELECT 'TempStagingTableInfo: ', @SQL
+END
+
+
+ 
+/*Use the table info values from TempStagingTableInfo temp table to construct staging and final tables */
+DECLARE @tempcount int = 1
+
+WHILE @tempcount <= @TotaltempColumns
+BEGIN
+    SET @SQL = 
+        ' 
+            SET @ClientParentID = (select ClientParentID from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+')
+            SET @ProviderID = (select ProviderID from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @SourceServer = (select Stage1DestinationServername from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @DestinationServer = (select Stage2DestinationServername from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @SourceDatabase = (select Stage1DestinationDatabasename from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @DestinationDatabase = (select Stage2DestinationDatabasename from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @SourceTableName = (select Stage1DestinationTablename from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+            SET @DestinationTableName = (select Stage2DestinationTablename from '+@TempStagingTableInfo+' where ID = '+convert(nvarchar(100),@tempcount)+' )
+        '
+
+        EXECUTE sp_executesql 
+			  @SQL
+			, N' @ClientParentID int OUTPUT
+                ,@ProviderID int OUTPUT
+                ,@SourceServer nvarchar(max) OUTPUT
+                ,@DestinationServer nvarchar(max) OUTPUT
+                ,@SourceDatabase nvarchar(max) OUTPUT
+                ,@DestinationDatabase nvarchar(max) OUTPUT
+                ,@SourceTableName nvarchar(max) OUTPUT
+                ,@DestinationTableName nvarchar(max) OUTPUT'
+			    ,@ClientParentID = @ClientParentID OUTPUT
+                ,@ProviderID = @ProviderID OUTPUT
+                ,@SourceServer = @SourceServer OUTPUT
+                ,@DestinationServer = @DestinationServer OUTPUT
+                ,@SourceDatabase = @SourceDatabase OUTPUT
+                ,@DestinationDatabase = @DestinationDatabase OUTPUT
+                ,@SourceTableName = @SourceTableName OUTPUT
+                ,@DestinationTableName = @DestinationTableName OUTPUT
+
+
+IF @DebugFlag = 1
+	SELECT 'TempStagingTableInfo: ', @SQL
+  
+SET  @SourceDatabase = REPLACE(@SourceDatabase,'#',@ClientParentID)
+SET  @DestinationDatabase = REPLACE(@DestinationDatabase, '#',@ClientParentID)
+SET  @SourceTableName = REPLACE(@SourceTableName,'#',@ProviderID)
+SET  @DestinationTableName = REPLACE(@DestinationTableName,'#',@ProviderID)
+
+
+
+/*Stage 1 table */
+set @SQLStage1= 
+    '
+     select '''+@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+''' as ['+@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+'], * from '
+     +@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+' where controlID IN ('
+     +CASE WHEN CONVERT(NVARCHAR(20),@Control_ID) IS NOT NULL THEN CONVERT(NVARCHAR(20),@Control_ID)
+      ELSE (SELECT CONVERT(NVARCHAR(20),FileControlID) from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where CONVERT(NVARCHAR(20),processcontrolID) = CONVERT(NVARCHAR(20),@aprocessControlID)) END+')
+    '
+EXEC (@SQLStage1)
+
+ IF @DebugFlag = 1
+	SELECT @SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+': ', @SQLStage1
+
+    
+/*Stage 2 DTN table */
+set @SQLdtn= 
+    '
+     select '''+@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+'_DTN'' as ['+@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+'_DTN], * from '
+     +@SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+'_DTN where controlID IN ('
+     +CASE WHEN CONVERT(NVARCHAR(20),@Control_ID) IS NOT NULL THEN CONVERT(NVARCHAR(20),@Control_ID)
+      ELSE (SELECT CONVERT(NVARCHAR(20),FileControlID) from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where CONVERT(NVARCHAR(20),processcontrolID) = CONVERT(NVARCHAR(20),@aprocessControlID)) END+')
+    '
+EXEC (@SQLdtn)
+ IF @DebugFlag = 1
+	SELECT @SourceServer+'.'+@SourceDatabase+'.dbo.'+@SourceTableName+'_DTN: ', @SQLdtn
+
+
+/* Stage 2 final table */
+set @SQLStage2= 
+    '
+     select '''+@DestinationServer+'.'+@DestinationDatabase+'.dbo.'+@DestinationTableName+''' as ['+@DestinationServer+'.'+@DestinationDatabase+'.dbo.'+@DestinationTableName+'], * from '
+     +@DestinationServer+'.'+@DestinationDatabase+'.dbo.'+@DestinationTableName+' where controlID IN ('
+     +CASE WHEN CONVERT(NVARCHAR(20),@Control_ID) IS NOT NULL THEN CONVERT(NVARCHAR(20),@Control_ID)
+      ELSE (SELECT CONVERT(NVARCHAR(20),FileControlID) from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] where CONVERT(NVARCHAR(20),processcontrolID) = CONVERT(NVARCHAR(20),@aprocessControlID)) END+')
+    '
+EXEC (@SQLStage2)
+IF @DebugFlag = 1
+	SELECT @DestinationServer+'.'+@DestinationDatabase+'.dbo.'+@DestinationTableName+': ', @SQLStage2
+
+set @tempcount = @tempcount + 1
+
+END
+
+
