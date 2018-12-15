@@ -1,0 +1,680 @@
+USE [ClientDB_Generic]
+
+DECLARE @ProcessorID INT = 2613
+DECLARE
+        @DestinatiomMetaDataID1 INT = (select ID from [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] where DestinationProcessorID = @ProcessorID and DestinationStageID = 1),
+        @DestinatiomMetaDataID2 INT = (select ID from [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] where DestinationProcessorID = @ProcessorID and DestinationStageID = 2)
+
+
+DECLARE   
+	  @DebugFlag BIT = 0--1 to review values before Inserting/0 to execute.
+	, @StageID1 INT = 1
+	, @StageID2 INT = 2
+	, @True BIT = 1
+	, @False BIT = 0
+	, @Zero INT = 0
+	, @EmptyString VARCHAR(10) = ''
+	, @SQLInsert NVARCHAR(MAX)
+	, @SQLSelect NVARCHAR(MAX)
+	, @SQLUpdate NVARCHAR(MAX)
+	, @SQL NVARCHAR(MAX)
+	, @FieldCounter INT = 0
+
+DECLARE	  
+	  @ResetSQL NVARCHAR(MAX) = 'SET @SQLInsert = NULL; SET @SQLSelect = NULL; SET @SQLUpdate = NULL; SET @SQL = NULL;'
+	, @Stage2Vars NVARCHAR(MAX) = 'tempdb.dbo.Stage2Vars_' + CONVERT(VARCHAR(10), @ProcessorID) + '_' + REPLACE(Session_user,'\',@EmptyString)
+	, @Stage2Fields NVARCHAR(MAX) = 'tempdb.dbo.Stage2Fields_' + CONVERT(VARCHAR(10), @ProcessorID) + '_' + REPLACE(Session_user,'\',@EmptyString)
+	, @GenericClientDB NVARCHAR(MAX) = 'ClientDB_Generic'
+	, @InsertSQL NVARCHAR(MAX) = @EmptyString
+	, @SelectSQL NVARCHAR(MAX) = @EmptyString
+
+	--Drop and recreate Temp
+SET @SQL = 
+	'
+		USE [' + @GenericClientDB + ']
+
+		IF OBJECT_ID(''' + @Stage2Vars + ''', ''U'') IS NOT NULL
+			BEGIN 
+				DROP TABLE ' + @Stage2Vars + '
+			END
+
+            CREATE TABLE 
+					' + @Stage2Vars + '
+					(
+						  ID INT Identity(1,1) NOT NULL
+						, ProcessorID INT NOT NULL
+						, DestinationMetaDataIDStage1 INT NOT NULL
+						, DestinationMetaDataIDStage2 INT NOT NULL
+						, Stage1ConnectionString VARCHAR(MAX) NOT NULL
+						, Stage1ServerName VARCHAR(MAX) NOT NULL
+						, Stage1DatabaseName VARCHAR(MAX) NOT NULL
+						, Stage1TableName VARCHAR(MAX) NOT NULL
+						, ProviderID INT NOT NULL
+						, ClientParentID INT NOT NULL
+					)
+		
+		IF OBJECT_ID(''' + @Stage2Fields + ''', ''U'') IS NOT NULL 
+			BEGIN 
+				DROP TABLE ' + @Stage2Fields + '
+			END
+
+            CREATE TABLE 
+					' + @Stage2Fields + '
+					(
+						  ID INT Identity(1,1) NOT NULL
+						, ProcessorID INT NOT NULL
+						, DestinationMetaDataID INT NOT NULL
+						, ColumnName VARCHAR(MAX) NOT NULL
+						, ColumnDataType VARCHAR(MAX) NULL
+						, ColumnLen VARCHAR(MAX) NOT NULL
+						, CleanedColumnName VARCHAR(MAX) NULL
+						, EstimatedColumnLen VARCHAR(MAX) NULL
+					)
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			  'Drop/Create SQL'
+			, @SQL	
+	END
+
+EXEC (@SQL)
+		
+--Populate Temp
+SET @SQL =
+	'
+		INSERT INTO 
+			' + @Stage2Vars + '
+			(
+				  ProcessorID
+				, DestinationMetaDataIDStage1
+				, DestinationMetaDataIDStage2
+				, Stage1ConnectionString
+				, Stage1ServerName 
+				, Stage1DatabaseName 
+				, Stage1TableName 
+				, ProviderID 
+				, ClientParentID
+			)
+		SELECT
+			  ' + CONVERT(VARCHAR(10), @ProcessorID) + '
+			, DMD1.ID
+			, DMD2.ID
+			, '''' + ' + @GenericClientDB + '.dbo.fnTrueQuoteName(GEC.DestinationServer, ''['', '']'') + ''.'' + ' + @GenericClientDB + '.dbo.fnTrueQuoteName(REPLACE(GEC.DestinationDatabase, ''#'', CMA.ClientParentID), ''['', '']'') + ''.'' + ' + @GenericClientDB + '.dbo.fnTrueQuoteName(''dbo'', ''['', '']'') + ''.'' + ' + @GenericClientDB + '.dbo.fnTrueQuoteName(REPLACE(DestinationTableName, ''#'', CMA.ProviderID), ''['', '']'') + ''''
+			, GEC.DestinationServer
+			, REPLACE(GEC.DestinationDatabase,''#'',CMA.ClientParentID)
+			, REPLACE(DestinationTableName,''#'',CMA.ProviderID)
+			, CMA.ProviderID
+			, CMA.ClientParentID
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalAssignment] CMA
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] DMD1
+					ON DMD1.DestinationProcessorID = CMA.ProcessorID
+					AND DMD1.DestinationStageID = ' + CONVERT(VARCHAR(10), @StageID1) + '
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] DMD2
+					ON DMD2.DestinationProcessorID = CMA.ProcessorID
+					AND DMD2.DestinationStageID = ' + CONVERT(VARCHAR(10), @StageID2) + '
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] GEC
+					ON GEC.Processor_ID = CMA.ProcessorID
+					AND GEC.DestinationStageID = ' + CONVERT(VARCHAR(10), @StageID1) + '
+		WHERE 
+				CMA.ProcessorID = ' + CONVERT(VARCHAR(10), @ProcessorID) + '
+			AND CMA.DestinationStageID = ' + CONVERT(VARCHAR(10), @StageID1) + '
+
+		INSERT INTO 
+			' + @Stage2Fields + '
+			(
+				  ProcessorID
+				, DestinationMetaDataID
+				, ColumnName
+				, CleanedColumnName
+				, ColumnLen
+			)
+		SELECT
+			  ProcessorID
+			, DestinationMetaDataID
+			, ColumnName
+			, CASE
+				WHEN ' + @GenericClientDB + '.dbo.fnTrueQuoteName(ColumnName, ''['', '']'') IN (''[Advertiser ID]'')
+				THEN '''' + ' + @GenericClientDB + '.dbo.fnTrueQuoteName(''ProviderAdvertiserID'', ''['', '']'') + ''''
+
+				ELSE ' + @GenericClientDB + '.dbo.fnTrueQuoteName(dbo.udf_CleanColumnName(ColumnName), ''['', '']'')
+			  END
+			, LTRIM
+			  (
+				  RTRIM
+				  (
+					  ISNULL
+					  (
+						  NULLIF
+						  (
+							  REPLACE
+							  (
+								  REPLACE
+								  (
+									  SUBSTRING
+									  (
+										  ColumnDataType
+										, CHARINDEX(''('',ColumnDataType)
+										, CHARINDEX('')'',ColumnDataType)
+									  )
+									, ''(''
+									, ''' + @EmptyString + '''
+								  )
+								, '')''
+								, ''' + @EmptyString + '''
+							  )
+							, ''' + @EmptyString + '''
+						  )
+						, CONVERT(VARCHAR(10), ' + CONVERT(VARCHAR(10), @Zero) + ')
+					  )
+				  )
+			  )
+		FROM
+			[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+				INNER JOIN ' + @Stage2Vars + '
+					ON DestinationMetaDataIDStage1 = DestinationMetaDataID
+					AND DestinationStageID = ' + CONVERT(VARCHAR(10), @StageID1) + '
+	'
+
+IF @DebugFlag = @True
+	BEGIN
+		SELECT 
+			 'Populate Temp Tables'
+			, @SQL
+
+		SET @SQL = @SQL + 
+			'
+				SELECT 
+					* 
+				FROM 
+					' + @Stage2Vars + ' 
+				
+				SELECT 
+					* 
+				FROM 
+					' + @Stage2Fields + '
+			'
+
+	END
+
+EXEC (@SQL)
+
+--Create the Stage 2 Column Definitions if they do not exist already
+IF NOT EXISTS 
+(
+	SELECT 
+		1 
+	FROM 
+		[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] dcd
+			INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] dmd
+				ON dmd.ID = dcd.DestinationMetaDataID
+				AND DestinationProcessorID = @ProcessorID
+				AND dcd.DestinationStageID = @StageID2
+)
+	BEGIN
+		SET @SQL = 
+			'
+				SET @FieldCounter = (SELECT COUNT(*) FROM ' + @Stage2Fields + ')
+			'
+
+		EXECUTE sp_executesql
+			  @SQL
+			, N'@FieldCounter BIGINT OUTPUT'
+			, @FieldCounter = @FieldCounter OUTPUT
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT
+					  'Number of Fields'
+					, @FieldCounter
+			END
+	
+		--Update Stage2Fields with datatype codes and estimated Column len
+		WHILE @FieldCounter > @Zero
+			BEGIN
+				DECLARE 
+					  @FieldName NVARCHAR(MAX) 
+					, @FieldLen NVARCHAR(MAX)
+					, @Stage1ConnectionString NVARCHAR(MAX)
+				
+				SET @SQL =
+					'
+						SELECT 
+							  @FieldName = ColumnName
+							, @FieldLen = ColumnLen
+							, @Stage1ConnectionString = (SELECT Stage1ConnectionString FROM ' + @Stage2Vars + ')
+						FROM
+							' + @Stage2Fields + '
+						WHERE
+							ID = ' + CONVERT(VARCHAR(10), @FieldCounter) + '
+					'
+
+				EXECUTE sp_executesql
+					  @SQL
+					, N'@FieldName VARCHAR(MAX) OUTPUT
+					  , @FieldLen VARCHAR(MAX) OUTPUT
+					  , @Stage1ConnectionString VARCHAR(MAX) OUTPUT'
+					, @FieldName = @FieldName OUTPUT
+					, @FieldLen = @FieldLen OUTPUT
+					, @Stage1ConnectionString = @Stage1ConnectionString OUTPUT
+
+				IF @DebugFlag = @True
+					BEGIN
+						PRINT @FieldName 
+					END
+				
+				--Determine the max castable dataype
+				SET @SQL = 
+					'
+						UPDATE
+							temp
+						SET
+							EstimatedColumnLen = CASE 
+													WHEN ''' + @FieldLen + ''' = ''MAX'' 
+													THEN  ''MAX''
+													
+													ELSE ISNULL
+														 (
+															CONVERT
+															(
+																  VARCHAR(MAX)
+																, (
+																	SELECT 
+																		MAX(LEN(CONVERT(VARCHAR(MAX),' + @FieldName + ')))
+																	FROM
+																		' + @Stage1ConnectionString + '
+																  )
+															)
+															, CONVERT(VARCHAR(10), ' + CONVERT(VARCHAR(10), @Zero) + ')
+														 )
+												END
+						, ColumnDataType = CASE 
+											WHEN ''' + CONVERT(VARCHAR(MAX), @FieldLen) + ''' = ''MAX'' 
+											THEN  ''400''
+							
+											ELSE (
+													SELECT 
+														MAX(a.DataType)
+													FROM
+													(
+														SELECT TOP 15000
+															CASE
+																WHEN (
+																		SELECT 
+																			ColumnLen 
+																		FROM 
+																			' + @Stage2Fields + ' 
+																		WHERE 
+																			ID = ' + CONVERT(VARCHAR(10), @FieldCounter) + ' 
+																	 ) = ''MAX''
+																THEN ''400''
+
+																ELSE															
+																	CASE 
+																		WHEN ' + @FieldName + ' IS NULL OR ' + @FieldName + ' = ''' + @EmptyString + '''
+																		THEN ''0''
+																
+																		WHEN TRY_CAST(' + @FieldName + ' AS DATETIME) IS NOT NULL 
+																		THEN ''100''
+
+																		WHEN ISNUMERIC(CAST(' + @FieldName + ' AS VARCHAR(MAX)) + ''.e0'') = 1 
+																			AND TRY_CAST(' + @FieldName + ' AS BIGINT) IS NOT NULL 
+																		THEN ''200''
+													
+																		WHEN TRY_CAST(' + @FieldName + ' AS NUMERIC(18,9)) IS NOT NULL 
+																		THEN ''300'' 
+							
+																		ELSE ''400''
+																	END 
+															END AS DataType
+														FROM 
+															' + @Stage1ConnectionString + '
+													)a
+												 )
+										   END
+						FROM 
+							' + @Stage2Fields + ' temp
+						WHERE
+							ID = ' + CONVERT(VARCHAR(10), @FieldCounter ) + '
+					'
+
+				IF @DebugFlag = @True
+					BEGIN
+						SELECT
+							  'Try_Cast SQL:' + @FieldName + '_' + CONVERT(VARCHAR(10), @FieldCounter)
+							, @SQL
+					END
+
+				EXEC (@SQL)
+
+				SET @FieldCounter = @FieldCounter - 1
+			END
+
+		IF @DebugFlag = @True
+			BEGIN
+				SET @SQL = 
+					'
+						SELECT 
+							*
+						FROM
+							' + @Stage2Fields + '
+					'
+
+				SELECT 
+					'Verify Estimated datatypes'
+
+				EXEC (@SQL)
+			END
+
+		--Translate datatype codes to datatypes
+		SET @SQL =
+			'
+				UPDATE 
+					temp
+				SET 
+					ColumnDataType = CASE
+										WHEN temp.ColumnDataType = ''100''
+										THEN ''[DATETIME]''
+
+										WHEN temp.ColumnDataType = ''200''
+										THEN ''[BIGINT]''
+
+										WHEN temp.ColumnDataType = ''300''
+										THEN ''[NUMERIC](18,9)''
+
+										ELSE CASE
+												WHEN dcd.ColumnDataType LIKE ''%VARCHAR%'' 
+												THEN ''[VARCHAR]('' + CONVERT(VARCHAR(MAX), CASE
+																								WHEN temp.EstimatedColumnLen = ''MAX''
+																								THEN ''MAX''
+
+																								ELSE CASE
+																										WHEN CONVERT(BIGINT, temp.EstimatedColumnLen) > 4000  
+																										THEN ''MAX''
+																			
+																										WHEN CONVERT(BIGINT, temp.EstimatedColumnLen) < CONVERT(BIGINT, temp.ColumnLen)
+																										THEN temp.ColumnLen
+
+																										ELSE CONVERT(VARCHAR(MAX), CONVERT(BIGINT, temp.EstimatedColumnLen) + 1000 - CONVERT(BIGINT, temp.EstimatedColumnLen))
+																									 END 
+																							 END) + '')''
+											
+												ELSE ''[VARCHAR]('' + CONVERT(VARCHAR(MAX), CASE
+																								WHEN temp.EstimatedColumnLen = ''MAX'' 
+																								THEN ''MAX''
+																			
+																								ELSE CASE
+																										WHEN CONVERT(BIGINT, temp.EstimatedColumnLen ) > 8000 
+																										THEN ''MAX''
+																			
+																										WHEN CONVERT(BIGINT, temp.EstimatedColumnLen) < CONVERT(BIGINT, temp.ColumnLen)
+																										THEN temp.ColumnLen
+
+																										ELSE CONVERT(VARCHAR(MAX),CONVERT(BIGINT, temp.EstimatedColumnLen) + 1000 - CONVERT(BIGINT,temp.EstimatedColumnLen))
+																									 END
+																							END) + '')''
+											 END
+									 END
+				FROM
+					' + @Stage2Fields + ' temp
+						INNER JOIN ' + @Stage2Vars + ' Vars
+							ON temp.ProcessorID = Vars.ProcessorID
+						INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] dcd
+							ON dcd.DestinationMetaDataID = Vars.DestinationMetaDataIDStage1
+			'
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT
+					  'Translate DataType Codes'
+					, @SQL
+			END
+
+		EXEC (@SQL)
+
+		IF @DebugFlag = @True
+			BEGIN
+				SET @SQL = 
+					' 
+						SELECT
+							*
+						FROM
+							'  + @Stage2Fields + '
+					'
+
+				EXEC (@SQL)
+			END	
+			
+		--Insert the New Stage 2 Fields
+		SET @InsertSQL =
+			'
+				INSERT INTO 
+					[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+					(
+						  DestinationMetaDataID
+						, ColumnName
+						, ColumnDataType
+						, ColumnOrder
+						, ActiveFlag
+						, CreateDate
+						, DestinationStageID
+                        , SpecialTransformCode
+					)
+			'
+
+		SET @SelectSQL =
+			'
+				SELECT	
+					  Vars.DestinationMetaDataIDStage2
+					, Fiel.CleanedColumnName
+					, Fiel.ColumnDataType
+					, Fiel.ID ''ColumnOrder''
+					, ' + CONVERT(VARCHAR(10), @True) + '
+					, GETDATE()
+					, ' + CONVERT(VARCHAR(10), @StageID2) + '
+                    , NULL
+				FROM
+					' + @Stage2Fields + ' Fiel
+						INNER JOIN ' + @Stage2Vars + ' Vars
+							ON Fiel.ProcessorID = Vars.ProcessorID
+                             
+				UNION
+				SELECT
+					  Vars.DestinationMetaDataIDStage2
+					, ''[AdvertiserID]''
+					, ''[BIGINT]''
+					, (SELECT COUNT(*) FROM ' + @Stage2Fields + ') + 1 ''ColumnOrder''
+					, ' + CONVERT(VARCHAR(10), @True) + '
+					, GETDATE()
+					, ' + CONVERT(VARCHAR(10), @StageID2) + '
+                    , NULL
+				FROM
+					' + @Stage2Vars + ' Vars
+                UNION
+               SELECT
+					  Vars.DestinationMetaDataIDStage2
+					, ''[EventDate]''
+					, ''[DATETIME]''
+					, (SELECT COUNT(*) FROM ' + @Stage2Fields + ') + 2 ''ColumnOrder''
+					, ' + CONVERT(VARCHAR(10), @True) + '
+					, GETDATE()
+					, ' + CONVERT(VARCHAR(10), @StageID2) + '
+                    , ''case when [#FIELDNAME#] is not null then DATEADD(SECOND,cast([#FIELDNAME#] as bigint)/1000000,''''19700101 00:00'''') end''
+				FROM
+					' + @Stage2Vars + ' Vars
+
+				ORDER BY
+					ColumnOrder
+			'
+					
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT
+					  'Insert SQL'
+					, @InsertSQL + @SelectSQL
+
+				EXEC (@SelectSQL)
+			END
+		ELSE
+			BEGIN
+				SET @SQL = @InsertSQL + @SelectSQL
+				
+				EXEC (@SQL)
+			END
+	END
+
+ELSE
+	BEGIN
+		SELECT
+			dcd.*
+		FROM
+			[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] dcd
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] dmd
+					ON dmd.ID = dcd.DestinationMetaDataID
+					AND DestinationProcessorID = @ProcessorID
+					AND dcd.DestinationStageID = @StageID2
+		ORDER BY
+			ColumnOrder	
+	END
+
+
+--Map Stage 1 Columns to Stage 2 Columns
+IF NOT EXISTS 
+(
+	SELECT 
+		1 
+	FROM 
+		[HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap]
+	WHERE 
+		ProcessorID = @ProcessorID
+)
+	BEGIN
+		SET @InsertSQL =
+			'
+				INSERT INTO 
+					[HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap]
+					(
+						  SourceMetaID
+						, SourceColumnID
+						, DestinationMetaID
+						, DestinationColumnID
+						, DestinationStageID
+						, SpecialCode
+						, ProcessorID
+						, ColumnNo
+					)
+			'
+
+		SET @SelectSQL =
+			'
+				SELECT 
+					 cdc.DestinationMetaDataID
+					,cdc.ID
+					,dcd.DestinationMetaDataID
+					,dcd.ID
+					, ' + CONVERT(VARCHAR(10), @StageID2) + '
+					, ''DTN''
+					, ' + CONVERT(VARCHAR(10), @ProcessorID) + '
+					,cdc.ColumnOrder
+                FROM 
+                        [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] cdc                                                            
+			                RIGHT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] dcd 
+                                ON dcd.ColumnName= case when ClientDB_Generic.dbo.udf_ColumnNameReplaceAWB (cdc.ColumnName) = ''[AdvertiserID]'' then ''[ProviderAdvertiserID]'' 
+                                    when ClientDB_Generic.dbo.udf_ColumnNameReplaceAWB (cdc.ColumnName) = ''[EventTime]'' then ''[EventDate]'' 
+                                    else ClientDB_Generic.dbo.udf_ColumnNameReplaceAWB (cdc.ColumnName)   end 
+                                   
+        WHERE 
+		                    cdc.DestinationMetaDataID = '+ CONVERT(VARCHAR(10), @DestinatiomMetaDataID1) +' --old destination
+		                AND dcd.DestinationMetaDataID = '+ CONVERT(VARCHAR(10), @DestinatiomMetaDataID2) +' --new destination
+                                                           
+                
+                
+			'
+
+		IF @DebugFlag = @True
+			BEGIN
+				SELECT
+					  'Source To Destination Map SQL'
+					, @InsertSQL + @SelectSQL
+
+				EXEC (@SelectSQL)
+			END
+		ELSE
+			BEGIN
+				SET @SQL = @InsertSQL + @SelectSQL
+
+				EXEC (@SQL)
+			END
+	END
+ELSE
+	SELECT	
+		  SDM.ID
+		, SDM.ProcessorID
+		, SDM.ColumnNo SDMOrder
+		, DCD1.ID Stage1ID
+		, DCD1.ColumnName Stage1Name
+		, DCD1.ColumnDataType Stage1DataType
+		, DCD2.ID Stage2ID
+		, DCD2.ColumnName Stage2Name
+		, DCD2.ColumnDataType Stage2DataType
+		, DCD1.ColumnOrder Stage1Order
+		, DCD2.ColumnOrder Stage2Order
+		, DCD2.NormalizationSP
+		, DCD2.NormalizationParameterID
+		, DCD2.NormalizationColumnMasterTable
+		, DCD2.RemoveColInDestTable
+		, DCD1.SpecialTransformCode Stage1CustomCode
+		, DCD2.SpecialTransformCode Stage2CustomCode
+		, DCD2.UpdateMySourceFlag
+		, sdm.*
+	FROM
+			[HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] SDM
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] DCD1
+					ON DCD1.ID = SDM.SourceColumnID
+					AND SDM.SourceMetaID = DCD1.DestinationMetaDataID
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] DCD2
+					ON DCD2.ID = SDM.DestinationColumnID
+					AND SDM.DestinationMetaID = DCD2.DestinationMetaDataID
+	WHERE
+			SDM.ProcessorID = @ProcessorID
+			and isnull(DCD1.activeflag,@False)	= @True
+			and isnull(DCD2.activeflag,@False)	= @True
+	
+--Set Stage 2 ClientMetalAssignment Record to be Active
+IF 
+(
+	SELECT 
+		ActiveFlag
+	FROM 
+		[HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalAssignment] CMA
+	WHERE 
+			ProcessorID = @ProcessorID
+		AND DestinationStageID = @StageID2 
+) = @False
+	BEGIN
+		UPDATE 
+			CMA 
+		SET 
+			ActiveFlag = @True
+		FROM 
+			[HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalAssignment] CMA
+		WHERE 
+				ProcessorID = @ProcessorID
+			AND DestinationStageID = @StageID2 
+			AND ActiveFlag = @False
+	END
+
+
+
+	
+
+
+
+	
+					
+
+				
+			
+				
