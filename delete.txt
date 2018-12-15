@@ -1,0 +1,174 @@
+DECLARE   @ProcID INT = 2899
+		, @ExecuteFlag BIT = 1
+		, @Stage1 int = 1
+		, @Stage2 int = 2
+		
+IF (@ExecuteFlag = 'TRUE')
+	BEGIN
+		UPDATE [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] 
+		SET SourceHeaderID = NULL
+		WHERE SourceProcessorID = @ProcID
+		
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[sourceheader] 
+		WHERE SourceMetaDataID IN
+		(
+			select id 
+			from [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] 
+			where SourceProcessorID = @ProcID
+		)
+
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[SourceColumnDefinition] 
+		WHERE SourceMetaDataID IN
+		(
+			select id 
+			from [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] 
+			where SourceProcessorID = @ProcID
+		)
+		
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] 
+		WHERE SourceProcessorID = @ProcID
+		
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[destinationColumnDefinition] 
+		WHERE destinationMetaDataID in 
+		(
+			select ID 
+			from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationmetadata] 
+			where destinationProcessorID = @ProcID 
+		)
+
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[destinationmetadata] 
+		WHERE destinationProcessorID = @ProcID 
+
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap]
+		WHERE ProcessorID = @ProcID
+		
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalSchedule] 
+		WHERE cmaid in 
+		(
+			select cmaid 
+			from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] 
+			where ProcessorID = @ProcID
+		)
+		
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[GenericETLConnectionStrings]
+		WHERE Processor_ID = @ProcID
+
+		DELETE FROM [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] 
+		WHERE processorid = @procID
+	END
+ELSE
+	BEGIN
+		select 'aDownload_Processor', ClientParentID, ProviderID, Site_ID, AdvertiserID,Active, Processor_Name, Processor_Description
+		--, * 
+		from HQIMPDW01.Exsto.dbo.Adownload_Processors
+		where processor_ID = @procID
+		
+		select 'Connection Strings', SourceconnectionType,DestinationStageID
+		, '['+SourceServer+'].['+SourceDatabase+'].[dbo].['+SourceTableName+']'
+		, '['+DestinationServer+'].['+DestinationDatabase+'].[dbo].['+DestinationTableName+']'
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[GenericETLConnectionStrings] s
+		where Processor_ID = @procID
+		order by s.DestinationStageID
+		
+		select 'Source Metadata', ID, ProviderID, SourceName,SourceFileExtension,SourceHeaderID, ColumnDelimiter, RowDelimiter, ConnectionStringID, Activeflag
+		,DataLevel, CleanFlag, FlexFile,Production,StatusDescription, ModificationPath
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] 
+		where SourceProcessorID = @ProcID
+		
+		select 'Source Header', ID,SourceMetaDataID,ProviderID, Header, HeaderDelimiter, RowsToSkip,ActiveFlag, FooterStopValue,ValueBeforeHeader
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[sourceheader] 
+		where SourceMetaDataID in (select id from [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] where SourceProcessorID = @ProcID)
+		
+		select 'Source Column Definition', ID, SourceMetaDataID,ColumnName, ColumnDataType,ColumnWidth,ColumnOrder,ColumnTextQualifier,ActiveFlag,FlexColumn
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[SourceColumnDefinition] 
+		where SourceMetaDataID in (select ID from [HQDMOSQL04].[MetalAdmin].[DBO].[sourcemetadata] where SourceProcessorID = @ProcID)
+		order by ColumnOrder
+		
+		select 'Destination Meta Data',ID, DestinationStageID, DestinationName,ConnectionStringID,activeflag, GenericStaging, ProviderID, RefreshData, ReplaceData, RefreshRateInDays, SpecialCodeID
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationmetadata] 
+		where destinationProcessorID = @ProcID
+		order by DestinationStageID
+
+		--stage1
+		select 'Stage 1 Destination Column Definitions', ID,ColumnName, ColumnDataType, ColumnOrder, ActiveFlag, FileColumnOrder, SpecialTransformCode
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationColumnDefinition] 
+		where destinationMetaDataID in (select ID from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationmetadata] where destinationProcessorID = @ProcID and DestinationStageID = @stage1)
+		order by ColumnOrder
+
+		--stage2
+		select 'Stage 2 Destination Column Definitions',ID, ColumnName, ColumnDataType, ColumnOrder, ActiveFlag
+		,NormalizationSP, NormalizationParameterID, RemoveColInDestTable, NormalizationColumnMasterTable, SpecialTransformCode,Mergeon
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationColumnDefinition] where destinationMetaDataID in (select ID from [HQDMOSQL04].[MetalAdmin].[DBO].[destinationmetadata] where destinationProcessorID = @ProcID and DestinationStageID = @stage2)
+		order by ColumnOrder
+
+		--Stage 1 to 2 field mapping
+		SELECT	'Source To Destination Mapping'
+				,SDM.ID
+				--,SDM.ProcessorID
+				,SDM.ColumnNo SDMOrder
+				,DCD1.ID Stage1ID
+				,DCD1.ColumnName Stage1Name
+				,DCD1.ColumnDataType Stage1DataType
+				,DCD2.ID Stage2ID
+				,DCD2.ColumnName Stage2Name
+				,DCD2.ColumnDataType Stage2DataType
+				,DCD1.ColumnOrder Stage1Order
+				,DCD2.ColumnOrder Stage2Order
+				--,DCD1.FlexColumnOrder Stage1Flex
+				--,DCD2.FlexColumnOrder Stage2Flex
+				,DCD2.NormalizationSP
+				,DCD2.NormalizationParameterID
+				,DCD2.NormalizationColumnMasterTable
+				,DCD2.RemoveColInDestTable
+				,DCD1.SpecialTransformCode Stage1CustomCode
+				,DCD2.SpecialTransformCode Stage2CustomCode
+				,DCD2.UpdateMySourceFlag
+				--,*
+		FROM
+				[HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] SDM
+					INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] DCD1
+						ON DCD1.ID = SDM.SourceColumnID
+						AND SDM.SourceMetaID = DCD1.DestinationMetaDataID
+					INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] DCD2
+						ON DCD2.ID = SDM.DestinationColumnID
+						AND SDM.DestinationMetaID = DCD2.DestinationMetaDataID
+		WHERE
+				SDM.ProcessorID = @Procid
+				and isnull(DCD1.activeflag,0)	= 1
+				and isnull(DCD2.activeflag,0)	= 1
+
+		select 'Client Metal Assignment',CMAID, DestinationStageID,DestinationName,ClientPArentID,ClientParentName,AdvertiserID
+		,ProviderID, ActiveFlag
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] where processorid = @procID
+		order by DestinationStageID
+		
+		select 'Client Metal Schedule',CMAID,BatchID, SundayRunTime, MondayRunTime, TuesdayRunTime,WednesdayRunTime,ThursdayRunTime,FridayRunTime
+		,SaturdayRunTime,PrioritySeq, ActiveFlag
+		--, * 
+		from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalSchedule] where cmaid in (select cmaid from [HQDMOSQL04].[MetalAdmin].[DBO].[ClientMetalAssignment] where ProcessorID = @ProcID)
+
+		select 'aDownload_Control', Control_ID, Status, Site_ID, FileLocation,Filename_Data, Stamp_Created, Stamp_Processor_Called,Stamp_Processor_Started
+		,Stamp_Processor_Completed,Data_Row_Count
+		--, * 
+		from [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] where processor_ID = @ProcID
+		order by stamp_created desc
+
+		select 'aProcess_Control',ProcessControlID,FileControlID, apc.status, filelocation, filename_data,ClientID,AdvertiserID,SiteID,ClientParentID,ProviderID
+		,'['+StagingServer+'].['+StagingDatabase+'].[dbo].['+DataPulledFrom+']'
+		,'['+FinalServer+'].['+FinalDatabase+'].[dbo].['+FinalTableName+']'
+		,apc.Stamp_Created,apc.Stamp_Processor_Called,apc.Stamp_Processor_Started,apc.Stamp_Processor_completed 
+		--, * 
+		from [hqdmosql03].[exstodisplay].[dbo].[aprocess_Control] apc
+		left outer join [hqdmosql03].[exstodisplay].[dbo].[adownload_Control] adc
+			on filecontrolID = control_ID
+		where processorID = @ProcID
+		order by stamp_created desc
+	END
