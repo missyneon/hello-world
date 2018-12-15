@@ -1,0 +1,1356 @@
+/*	NEW PROD - 2017-05-08
+	Determine if you will be altering a fieldname or adding new fields
+
+	IF RENAMING A FIELD:
+	-There is only logic in this script to rename Stage 1 fields.  At this time,
+	 we don't want to change stage 2 tables to prevent breaking scripts.  Stage
+	 1 fields map via their column ID, so if "Click" renames to "Clicks" the 
+	 link will not be broken.  Any requests for Stage 2 column renames should
+	 be done through a new ticket.
+
+     METRIC2, METRIC3, METRIC4, TRUE_METRIC2, TRUE_METRIC3, TRUE_METRIC4
+
+ 
+
+*/
+
+USE [ClientDB_Generic]
+
+DECLARE 
+	  @DebugFlag BIT = 1	-- If 0, execute, if 1, review
+	, @ProcID INT = 2899
+	, @AlterFlag BIT = 0
+	, @AddFlag BIT = 1
+	, @NewFieldList NVARCHAR(MAX) = 'actions:offsite_conversion.custom.1458590640904765'--'DBM URL,U Value'--'DBM URL'	--To add new fields, copy and paste comma delimited list of field names
+	, @CleanedFieldList NVARCHAR(MAX) = 'ActionsOffsiteConversionCustom1458590640904765'--'DBMURL,UValue'--'DBMURL' 	--Same list, manually remove special characters and set CamelCase
+	, @Stage2DataType NVARCHAR(150) = '[NUMERIC](18,9)'
+	, @AlterFieldOldName NVARCHAR(150) = NULL--'DBMURL,UValue' --'FullyOnScreenOrLargeAdImpressions'
+	, @AlterFieldNewName NVARCHAR(150) = NULL--'DBMURL,UValue'--'HumanAndFullyOnScreenOrLargeAdImpressions'
+	, @True BIT = 1
+	, @False BIT = 0
+
+--Global Variables
+DECLARE
+      @OnlyAlterStage2 BIT = @False --For Stage 1, set to @False; for Stage 2, set to @True
+    , @EmptyString NVARCHAR(10) = ''
+	, @Zero INT = 0
+	, @SQL NVARCHAR(MAX)
+	, @SQLAlter NVARCHAR(MAX)
+	, @AlterhdrckFlag BIT = @False
+	, @AlterStage1Flag BIT = @False
+	, @AlterStage2Flag BIT = @False
+	, @AlterDTNFlag BIT = @False
+	, @SQLAdd NVARCHAR(MAX)
+	, @ClientParentID BIGINT
+	, @ProviderID BIGINT
+	, @Stage1DB NVARCHAR(MAX) 
+	, @Stage1Table NVARCHAR(MAX)
+	, @Stage2DB NVARCHAR(MAX)
+	, @Stage2Table NVARCHAR(MAX)
+	, @Stage1FullName NVARCHAR(MAX)
+	, @Stage2FullName NVARCHAR(MAX)
+	, @hdrckTable NVARCHAR(MAX)
+	, @DTNTable NVARCHAR(MAX)
+	, @hdrckFullName NVARCHAR(MAX)
+	, @DTNFullName NVARCHAR(MAX)
+	, @Stage1ID INT = 1
+	, @Stage2ID INT = 2
+	, @DefaultDataType NVARCHAR(MAX) = '[VARCHAR](200)'
+	, @SourceMetaDataID INT
+	, @DestinationMetaDataID1 INT
+	, @DestinationMetaDataID2 INT
+	, @CPIDCount BIGINT
+	, @CPIDCounter BIGINT = 1
+	, @TableExists BIT = @False
+   
+
+DECLARE 
+	  @TempTableName VARCHAR(MAX) = 'tempdb.dbo.TempAddRemameConnectionStringsTable_' + CAST(@ProcID AS VARCHAR(10)) + '_' + CAST(REPLACE(SESSION_USER,'\',@EmptyString) AS VARCHAR(MAX)) 
+	, @TempTableAddFieldsName VARCHAR(MAX) = 'tempdb.dbo.TempAddFieldsTable_' + CAST(@ProcID AS VARCHAR(10)) + '_' + CAST(REPLACE(SESSION_USER,'\',@EmptyString) AS VARCHAR(MAX)) 
+
+--Populate temp table with all CPID's and tables
+SET @SQL = 
+	'
+		IF OBJECT_ID(''' + @TempTableName + ''', ''U'') IS NOT NULL
+			DROP TABLE ' + @TempTableName + '
+
+		CREATE TABLE ' + @TempTableName + '
+			(
+				  RowNum BIGINT IDENTITY(1,1)
+				, ProcID BIGINT
+				, ProviderID BIGINT
+				, ClientParentID BIGINT
+				, Stage1FullName VARCHAR(MAX)
+				, Stage2FullName VARCHAR(MAX)
+				, hdrckFullName VARCHAR(MAX)
+				, DTNFullName VARCHAR(MAX)
+				, Stage1DB VARCHAR(MAX)
+				, Stage1Table VARCHAR(MAX)
+				, Stage2DB VARCHAR(MAX)
+				, Stage2Table VARCHAR(MAX)
+				, hdrckTable VARCHAR(MAX)
+				, DTNTable VARCHAR(MAX)
+				, SourceMetaDataID BIGINT
+				, DestinationMetaDataID1 BIGINT
+				, DestinationMetaDataID2 BIGINT
+			)
+
+		INSERT INTO ' + @TempTableName + '
+			(
+				  ProcID
+				, ProviderID
+				, ClientParentID
+				, Stage1DB
+				, Stage1Table
+				, Stage2DB
+				, Stage2Table
+				, hdrckTable
+				, DTNTable
+				, SourceMetaDataID
+				, DestinationMetaDataID1
+				, DestinationMetaDataID2
+			)
+		SELECT 
+			  CMA.ProcessorID
+			, CMA.ProviderID
+			, CMA.ClientParentID
+			, REPLACE(GCS2.DestinationDatabase,''#'', CMA.ClientParentID) + ''_Staging''
+			, REPLACE(GCS1.DestinationTableName,''#'', CMA.ProviderID)
+			, REPLACE(GCS2.DestinationDatabase,''#'', CMA.ClientParentID)
+			, REPLACE(GCS2.DestinationTableName,''#'', CMA.ProviderID)
+			, REPLACE(GCS1.DestinationTableName,''#'', CMA.ProviderID) + ''hdrck''
+			, REPLACE(GCS1.DestinationTableName,''#'', CMA.ProviderID) + ''_DTN''
+			, SMD.ID
+			, DMD1.ID
+			, DMD2.ID
+
+		FROM
+			[HQDMOSQL04].[MetalAdmin].[dbo].[ClientMetalAssignment] CMA
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] GCS1
+					ON CMA.ProcessorID = GCS1.Processor_ID
+					AND GCS1.DestinationStageID = ' + CONVERT(VARCHAR(10), @Stage1ID) + '
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[GenericETLConnectionStrings] GCS2
+					ON CMA.ProcessorID = GCS2.Processor_ID
+					AND GCS2.DestinationStageID = ' + CONVERT(VARCHAR(10), @Stage2ID) + '
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[SourceMetaData] SMD
+					ON CMA.ProcessorID = SMD.SourceProcessorID
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] DMD1
+					ON CMA.ProcessorID = DMD1.DestinationProcessorID
+					AND DMD1.DestinationStageID = ' + CONVERT(VARCHAR(10), @Stage1ID) + '
+				INNER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationMetaData] DMD2
+					ON CMA.ProcessorID = DMD2.DestinationProcessorID
+					AND DMD2.DestinationStageID = ' + CONVERT(VARCHAR(10), @Stage2ID) + '
+		WHERE 
+			CMA.ProcessorID = ' + CONVERT(VARCHAR(10), @ProcID) + '
+		GROUP BY
+			  CMA.ProcessorID
+			, CMA.ProviderID
+			, CMA.ClientParentID
+			, REPLACE(GCS1.DestinationDatabase,''#'', CMA.ClientParentID)
+			, REPLACE(GCS1.DestinationTableName,''#'', CMA.ProviderID)
+			, REPLACE(GCS2.DestinationDatabase,''#'', CMA.ClientParentID)
+			, REPLACE(GCS2.DestinationTableName,''#'', CMA.ProviderID)
+			, SMD.ID
+			, DMD1.ID
+			, DMD2.ID
+
+		UPDATE 
+			' + @TempTableName +'
+		SET
+			  Stage1FullName = ''['' + Stage1DB + ''].[dbo].['' + Stage1Table + '']''
+			, Stage2FullName = ''['' + Stage2DB + ''].[dbo].['' + Stage2Table + '']''
+			, hdrckFullName = ''['' + Stage1DB + ''].[dbo].['' + hdrckTable + '']''
+			, DTNFullName = ''['' + Stage1DB + ''].[dbo].['' + DTNTable + '']''
+
+		SET @CPIDCount = (SELECT COUNT(*) FROM ' + @TempTableName + ')
+	'
+
+IF @DebugFlag = @True
+	SET @SQL = @SQL + ' SELECT * FROM ' + @TempTableName
+
+EXECUTE sp_executesql 
+	  @SQL
+	, N'@CPIDCount int OUTPUT'
+	, @CPIDCount = @CPIDCount OUTPUT
+
+IF @DebugFlag = @True
+	SELECT @CPIDCount 'CPIDCount'
+
+IF @AlterFlag = @False AND @AddFlag = @False
+	BEGIN
+		PRINT 'DO NOTHING.'	
+	END
+ELSE
+	BEGIN
+		IF @AlterFlag = @True AND @AddFlag = @True
+			BEGIN
+				PRINT 'CAN''T ADD AND ALTER AT THE SAME TIME'
+			END
+		ELSE
+			BEGIN
+				--rename field logic
+				IF @AlterFlag = @True
+					BEGIN
+						--Only rename in Stage 1 OR Stage 2
+							--Stage 2 and Stage 1 have different column names, (one cleaned, one as it comes on the file)
+							--Stage 2 DOES NOT need to be renamed if you are changing a Stage 1 column because of the SourceToDestinationMapping
+							--Unless you are changing a Stage 2 field, Only the stage 1 table will be renamed (So existing scripts don't break i.e. audit scripts MPO may be using)
+						PRINT 'Old Name: [' + @AlterFieldOldName + ']  to  New Name: [' + @AlterFieldNewName + ']'
+
+						SET @SQLAlter = @EmptyString
+
+						WHILE @CPIDCounter <= @CPIDCount
+							BEGIN
+								--Set Variables							
+								SET @SQL = 
+									'
+										SELECT
+											  @ProcID = ProcID 
+											, @ProviderID = ProviderID 
+											, @ClientParentID = ClientParentID
+											, @Stage1FullName = Stage1FullName 
+											, @Stage2FullName = Stage2FullName 
+											, @hdrckFullName = hdrckFullName
+											, @DTNFullName = DTNFullName 
+											, @Stage1DB = Stage1DB 
+											, @Stage1Table = Stage1Table 
+											, @Stage2DB = Stage2DB 
+											, @Stage2Table = Stage2Table 
+											, @hdrckTable = hdrckTable
+											, @DTNTable = DTNTable
+											, @SourceMetaDataID = SourceMetaDataID
+											, @DestinationMetaDataID1 = DestinationMetaDataID1
+											, @DestinationMetaDataID2 = DestinationMetaDataID2
+										FROM
+											' + @TempTableName + '
+										WHERE 
+											RowNum = @CPIDCounter	
+									'
+
+								EXECUTE sp_executesql 
+									  @SQL
+									, N'@ProcID BIGINT OUTPUT
+									  , @ProviderID BIGINT OUTPUT
+									  , @ClientParentID BIGINT OUTPUT
+									  , @Stage1FullName VARCHAR(MAX) OUTPUT
+									  , @Stage2FullName VARCHAR(MAX) OUTPUT
+									  , @hdrckFullName VARCHAR(MAX) OUTPUT
+									  , @DTNFullName VARCHAR(MAX) OUTPUT
+									  , @Stage1DB VARCHAR(MAX) OUTPUT
+									  , @Stage1Table VARCHAR(MAX) OUTPUT
+									  , @Stage2DB VARCHAR(MAX) OUTPUT
+									  , @Stage2Table VARCHAR(MAX) OUTPUT
+									  , @hdrckTable VARCHAR(MAX) OUTPUT
+									  , @DTNTable VARCHAR(MAX) OUTPUT
+									  , @SourceMetaDataID BIGINT OUTPUT
+									  , @DestinationMetaDataID1 BIGINT OUTPUT
+									  , @DestinationMetaDataID2 BIGINT OUTPUT
+									  , @CPIDCounter BIGINT'
+									, @ProcID = @ProcID OUTPUT
+									, @ProviderID = @ProviderID OUTPUT
+									, @ClientParentID = @ClientParentID OUTPUT
+									, @Stage1FullName = @Stage1FullName OUTPUT
+									, @Stage2FullName = @Stage2FullName OUTPUT
+									, @hdrckFullName = @hdrckFullName OUTPUT
+									, @DTNFullName = @DTNFullName OUTPUT
+									, @Stage1DB = @Stage1DB OUTPUT
+									, @Stage1Table = @Stage1Table OUTPUT
+									, @Stage2DB = @Stage2DB OUTPUT
+									, @Stage2Table = @Stage2Table OUTPUT
+									, @hdrckTable = @hdrckTable OUTPUT
+									, @DTNTable = @DTNTable OUTPUT
+									, @SourceMetaDataID = @SourceMetaDataID OUTPUT
+									, @DestinationMetaDataID1 = @DestinationMetaDataID1 OUTPUT
+									, @DestinationMetaDataID2 = @DestinationMetaDataID2 OUTPUT
+									, @CPIDCounter = @CPIDCounter
+								
+								PRINT '!!!!!!!!!!!!!!! BEGIN ALTERING COLUMN: [' + @AlterFieldOldName + '] to [' + @AlterFieldNewName + '] for CPID [' + CONVERT(VARCHAR(20), @ClientParentID) + ']. !!!!!!!!!!!!!!!' + CHAR(10)  
+								
+								--Set Client DB
+								SET @SQLAlter =  
+									CASE
+										WHEN @OnlyAlterStage2 = @False
+										THEN
+											'
+												USE [' + @Stage1DB + ']
+											'
+
+										ELSE
+											'
+												USE [' + @Stage2DB + ']
+											'
+									END	
+								
+								--Alter Column in SourceColumnDefinitions
+								IF @OnlyAlterStage2 = @False
+									BEGIN
+										IF NOT EXISTS
+										(
+											SELECT
+												1
+											FROM
+												[HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition]
+											WHERE
+												'[' + REPLACE(REPLACE(ColumnName,']',@EmptyString),'[',@EmptyString) + ']' = '[' + @AlterFieldNewName + ']' 
+											AND	SourceMetaDataID = @SourceMetaDataID
+										)
+											BEGIN
+												SET @SQLAlter = @SQLAlter + 
+													'
+														UPDATE
+															[HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition]
+														SET
+															ColumnName = ''[' + @AlterFieldNewName + ']''
+														WHERE
+																''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @AlterFieldOldName + ']''
+															AND	SourceMetaDataID = ' + CONVERT(VARCHAR(10), @SourceMetaDataID) + '
+
+														PRINT
+															''Source Column Definition: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+													'
+											END
+										ELSE
+											BEGIN
+												PRINT 'Source Column Definition: Column name [' + @AlterFieldNewName + '] already exists.'
+											END
+									END
+								ELSE	
+									BEGIN
+										PRINT 'Source Column Definition: Do not alter Source column Definition.  Only Alter Stage 2 Enabled.'
+									END
+
+								--Alter Column in DestinationColumnDefinitions: Stage 1
+								IF @OnlyAlterStage2 = @False
+									BEGIN
+										IF NOT EXISTS
+										(
+											SELECT
+												1
+											FROM
+												[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+											WHERE
+												'[' + REPLACE(REPLACE(ColumnName,']',@EmptyString),'[',@EmptyString) + ']' = '[' + @AlterFieldNewName + ']' 
+											AND	DestinationMetaDataID = @DestinationMetaDataID1
+										)
+											BEGIN
+												SET @SQLAlter = @SQLAlter + 
+													'
+														UPDATE
+															[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+														SET
+															ColumnName = ''[' + @AlterFieldNewName + ']''
+														WHERE
+																''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @AlterFieldOldName + ']''
+															AND	DestinationMetaDataID = ' + CONVERT(VARCHAR(10), @DestinationMetaDataID1) + '
+
+														PRINT
+															''Destination Column Definition Stage 1: column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+													'
+											END
+										ELSE
+											BEGIN
+												PRINT 'Destination Column Definition Stage 1: column [' + @AlterFieldNewName + '] already exists.'
+											END
+									END
+								ELSE	
+									BEGIN
+										PRINT 'Destination Column Definition Stage 1: Do not Alter Stage 1 Destination column Definition.  Only Alter Stage 2 Enabled.'
+									END
+
+								--Alter Column in DestinationColumnDefinitions: Stage 2
+								IF @OnlyAlterStage2 = @True
+									BEGIN
+										IF NOT EXISTS
+										(
+											SELECT
+												1
+											FROM
+												[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+											WHERE
+												'[' + REPLACE(REPLACE(ColumnName,']',@EmptyString),'[',@EmptyString) + ']' = '[' + @AlterFieldNewName + ']' 
+											AND	DestinationMetaDataID = @DestinationMetaDataID2
+										)
+											BEGIN
+												SET @SQLAlter = @SQLAlter + 
+													'
+														UPDATE
+															[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+														SET
+															ColumnName = ''[' + @AlterFieldNewName + ']''
+														WHERE
+																''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @AlterFieldOldName + ']''
+															AND	DestinationMetaDataID = ' + CONVERT(VARCHAR(10), @DestinationMetaDataID2) + '
+
+														PRINT
+															''Destination Column Definition Stage 2: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+													'
+											END
+										ELSE
+											BEGIN
+												PRINT 'Destination Column Definition Stage 2: Column [' + @AlterFieldNewName + '] already exists.'
+											END
+									END
+
+								--Alter Column in Stage 1 Table
+								IF @OnlyAlterStage2 = @False
+									BEGIN
+										--Determine if the table exists
+										IF OBJECT_ID('' + @Stage1FullName + '', 'U') IS NOT NULL
+											BEGIN
+												SET @TableExists = @True
+											END	
+										ELSE
+											BEGIN
+												SET @TableExists = @False
+											END
+
+										IF @TableExists = @True
+											BEGIN
+												SET @SQL =
+													'
+														USE [' + @Stage1DB + ']
+												
+														IF NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage1Table + '''
+																AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+														)
+														AND
+														NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage1Table + '''
+																AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+														)
+															BEGIN
+																SET @AlterStage1Flag = ' + CONVERT(VARCHAR(10), @False) + '
+																PRINT ''Stage 1 Table: Neither Column exists in table ' + @Stage1FullName + '. Nothing Altered''
+															END
+														ELSE
+															BEGIN
+																IF NOT EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @Stage1Table + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+																)
+																AND
+																EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @Stage1Table + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+																)
+																	BEGIN
+																		SET @AlterStage1Flag = ' + CONVERT(VARCHAR(10), @False) + '
+																		PRINT ''Stage 1 Table: Column [' + @AlterFieldOldName + '] already exists. Nothing Altered''
+																	END
+																ELSE
+																	SET @AlterStage1Flag = ' + CONVERT(VARCHAR(10), @True) + '
+															END
+													'
+										
+												EXECUTE sp_executesql 
+													  @SQL
+													, N'@AlterStage1Flag int OUTPUT'
+													, @AlterStage1Flag = @AlterStage1Flag OUTPUT	
+											
+												IF @AlterStage1Flag = @True
+													BEGIN
+														SET @SQLAlter = @SQLAlter +
+															'
+																EXEC sp_rename 
+																	  ''[' + @Stage1Table + '].[' + @AlterFieldOldName + ']''
+																	, ''' + @AlterFieldNewName + '''
+																	, ''COLUMN''
+
+																PRINT
+																	''Stage 1 Table: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+															'
+													END
+											END	
+										ELSE
+											BEGIN
+												PRINT 'Stage 1 Table: Table ' + @Stage1FullName + ' does not exist.  Nothing altered.'
+											END
+									END
+								ELSE	
+									BEGIN
+										PRINT 'Stage 1 Table: Do not Alter Stage 1 Table.  Only Alter Stage 2 Enabled.'
+									END
+
+								--Alter Column in hdrck Table
+								IF @OnlyAlterStage2 = @False
+									BEGIN
+										--Check if table exists
+										IF OBJECT_ID('' + @hdrckFullName + '', 'U') IS NOT NULL
+											BEGIN
+												SET @TableExists = @True
+											END
+										ELSE
+											BEGIN
+												SET @TableExists = @False
+											END	
+									
+										IF @TableExists = @True
+											BEGIN
+												SET @SQL =
+													'
+														USE [' + @Stage1DB + ']
+												
+														IF NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @hdrckTable + '''
+																AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+														)
+														AND
+														NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @hdrckTable + '''
+																AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+														)
+															BEGIN
+																SET @AlterhdrckFlag = ' + CONVERT(VARCHAR(10), @False) + '
+																PRINT ''HDRCK Table: Neither Column exists in table ' + @hdrckFullName + '. Nothing Altered''
+															END
+														ELSE
+															BEGIN
+																IF NOT EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @hdrckTable + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+																)
+																AND
+																EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @hdrckTable + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+																)
+																	BEGIN
+																		SET @AlterhdrckFlag = ' + CONVERT(VARCHAR(10), @False) + '
+																		PRINT ''HDRCK Table: Column [' + @AlterFieldOldName + '] already exists. Nothing Altered''
+																	END
+																ELSE
+																	SET @AlterhdrckFlag = ' + CONVERT(VARCHAR(10), @True) + '
+															END
+													'
+										
+												EXECUTE sp_executesql 
+													  @SQL
+													, N'@AlterhdrckFlag int OUTPUT'
+													, @AlterhdrckFlag = @AlterhdrckFlag OUTPUT	
+												
+												IF @AlterhdrckFlag = @True
+													BEGIN
+														SET @SQLAlter = @SQLAlter +
+															'
+																EXEC sp_rename 
+																	  ''[' + @hdrckTable + '].[' + @AlterFieldOldName + ']''
+																	, ''' + @AlterFieldNewName + '''
+																	, ''COLUMN''
+
+																PRINT
+																	''HDRCK Table: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+															'
+													END
+											END	
+										ELSE
+											BEGIN
+												PRINT 'HDRCK Table: Table ' + @hdrckFullName + ' does not exist.  Nothing altered.'
+											END
+									END
+								ELSE	
+									BEGIN
+										PRINT 'HDRCK Table: Do not Alter hdrck Table.  Only Alter Stage 2 Enabled.'
+									END
+
+								--Alter Column in Stage 2 Table
+								IF @OnlyAlterStage2 = @True
+									BEGIN
+										--Check if table exists
+										IF OBJECT_ID('' + @Stage2FullName + '', 'U') IS NOT NULL
+											BEGIN
+												SET @TableExists = @True
+											END
+										ELSE
+											BEGIN
+												SET @TableExists = @False
+											END	
+									
+										IF @TableExists = @True
+											BEGIN
+												SET @SQL =
+													'
+														USE [' + @Stage2DB + ']
+												
+														IF NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage2Table + '''
+																AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+														)
+														AND
+														NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage2Table + '''
+																AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+														)
+															BEGIN
+																SET @AlterStage2Flag = ' + CONVERT(VARCHAR(10), @False) + '
+																PRINT ''Stage 2 Table: Neither column exists in table ' + @Stage2FullName + '. Nothing Altered''
+															END
+														ELSE
+															BEGIN
+																IF NOT EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @Stage2Table + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+																)
+																AND
+																EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @Stage2Table + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+																)
+																	BEGIN
+																		SET @AlterStage2Flag = ' + CONVERT(VARCHAR(10), @False) + '
+																		PRINT ''Stage 2 table: Column [' + @AlterFieldOldName + '] already exists. Nothing Altered''
+																	END
+																ELSE
+																	SET @AlterStage2Flag = ' + CONVERT(VARCHAR(10), @True) + '
+															END
+													'
+										
+												EXECUTE sp_executesql 
+													  @SQL
+													, N'@AlterStage2Flag int OUTPUT'
+													, @AlterStage2Flag = @AlterStage2Flag OUTPUT	
+												
+												IF @AlterStage2Flag = @True
+													BEGIN
+														SET @SQLAlter = @SQLAlter +
+															'
+																EXEC sp_rename 
+																	  ''[' + @Stage2Table + '].[' + @AlterFieldOldName + ']''
+																	, ''' + @AlterFieldNewName + '''
+																	, ''COLUMN''
+
+																PRINT
+																	''Stage 2 Table: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+															'
+													END
+											END	
+										ELSE
+											BEGIN
+												PRINT 'Stage 2 Table: Table ' + @Stage2FullName + ' does not exist.  Nothing altered.'
+											END
+									END
+
+								--Alter Column in DTN Table
+								IF @OnlyAlterStage2 = @True
+									BEGIN
+										--Check if table exists
+										IF OBJECT_ID('' + @DTNFullName + '', 'U') IS NOT NULL
+											BEGIN
+												SET @TableExists = @True
+											END
+										ELSE
+											BEGIN
+												SET @TableExists = @False
+											END	
+									
+										IF @TableExists = @True
+											BEGIN
+												SET @SQL =
+													'
+														USE [' + @Stage1DB + ']
+												
+														IF NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @DTNTable + '''
+																AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+														)
+														AND
+														NOT EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @DTNTable + '''
+																AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+														)
+															BEGIN
+																SET @AlterDTNFlag = ' + CONVERT(VARCHAR(10), @False) + '
+																PRINT ''DTN Table: Neither column exists in table ' + @Stage2FullName + '. Nothing Altered''
+															END
+														ELSE
+															BEGIN
+																IF NOT EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @DTNTable + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldOldName + '''
+																)
+																AND
+																EXISTS
+																(
+																	SELECT 
+																		1
+																	FROM
+																		INFORMATION_SCHEMA.COLUMNS
+																	WHERE 
+																			TABLE_NAME = ''' + @DTNTable + '''
+																		AND COLUMN_NAME = ''' + @AlterFieldNewName + '''
+																)
+																	BEGIN
+																		SET @AlterDTNFlag = ' + CONVERT(VARCHAR(10), @False) + '
+																		PRINT ''DTN table: Column name [' + @AlterFieldNewName + '] already exists. Nothing Altered''
+																	END
+																ELSE
+																	SET @AlterDTNFlag = ' + CONVERT(VARCHAR(10), @True) + '
+															END
+													'
+
+												EXECUTE sp_executesql 
+													  @SQL
+													, N'@AlterDTNFlag int OUTPUT'
+													, @AlterDTNFlag = @AlterDTNFlag OUTPUT	
+
+												IF @AlterDTNFlag = @True
+													BEGIN
+														SET @SQLAlter = @SQLAlter + 
+															'
+																EXECUTE 
+																(
+																	''USE [' + @Stage1DB + ']
+																	
+																	EXEC sp_rename 
+																	  ''''[' + @DTNTable + '].[' + @AlterFieldOldName + ']''''
+																	, ''''' + @AlterFieldNewName + '''''
+																	, ''''COLUMN''''''
+																)
+
+																PRINT
+																	''DTN table: Column name [' + @AlterFieldOldName + '] was renamed to [' + @AlterFieldNewName + '] successfully.''
+															'
+													END
+											END	
+										ELSE
+											BEGIN
+												PRINT 'DTN Table: Table ' + @DTNFullName + ' does not exist.  Nothing altered.'
+											END
+									END
+
+								IF @DebugFlag = @False
+									BEGIN
+										Exec (@SQLAlter)
+									END
+								ELSE
+									BEGIN
+										SELECT 'Alter SQL', @SQLAlter, @CPIDCount, @CPIDCounter
+									END
+								
+								PRINT '!!!!!!!!!!!!!!! END ALTERING COLUMN: [' + @AlterFieldOldName + '] to [' + @AlterFieldNewName + '] for CPID [' + CONVERT(VARCHAR(20), @ClientParentID) + ']. !!!!!!!!!!!!!!!' + CHAR(10)  
+
+								SET @CPIDCounter = @CPIDCounter + 1
+							END
+					END
+				ELSE
+					BEGIN
+						SELECT 'Alter SQL', @SQLAlter
+					END
+				
+				--Add field logic
+				IF @AddFlag = @True
+					BEGIN
+						DECLARE 
+							  @Stage1AddString NVARCHAR(MAX)
+							, @Stage2AddString NVARCHAR(MAX)
+							, @TotalFieldCount1 INT = 0
+							, @TotalFieldCount2 INT = 0 
+							, @Counter INT = 1
+							, @Counter2 INT = 1
+							, @ColName NVARCHAR(MAX)
+							, @DataType NVARCHAR(MAX)
+
+						--Make Temp Table with new fields and datatypes
+						SET @SQL =
+							'
+								IF OBJECT_ID(''' + @TempTableAddFieldsName + ''', ''U'') IS NOT NULL
+									DROP TABLE ' + @TempTableAddFieldsName + '
+							
+								SELECT
+									  ROW_NUMBER() OVER ( ORDER BY StageID,ID) RowN
+									, ColumnName
+									, DataType 
+									, StageID
+								INTO 
+									' + @TempTableAddFieldsName + '
+								FROM
+								(
+									SELECT
+										  Id
+										, LTRIM(RTRIM(Data)) ColumnName
+										, ''' + @DefaultDataType + ''' DataType
+										, ''' + CONVERT(VARCHAR(10),@Stage1ID) + ''' StageID
+									FROM
+										dbo.fnStringSplit
+										(
+											  ''' + @NewFieldList + '''
+											, '',''
+										)
+									UNION ALL
+									SELECT
+										  Id + (SELECT COUNT(*) FROM dbo.fnStringSplit(''' + @NewFieldList + ''','','')) AS ID
+										, LTRIM(RTRIM(Data)) ColumnName
+										, ''' + @Stage2DataType + ''' DataType
+										, ''' + CONVERT(VARCHAR(10),@Stage2ID) + ''' StageID
+									FROM
+										dbo.fnStringSplit
+										(
+											  ''' + @CleanedFieldList + '''
+											, '',''
+										)
+								) A
+						
+								SET @TotalFieldCount1 = (SELECT MAX(Rown) FROM ' + @TempTableAddFieldsName + ' WHERE StageID = ' + CONVERT(VARCHAR(10),@Stage1ID) + ')
+								SET @TotalFieldCount2 = (SELECT MAX(RowN) FROM ' + @TempTableAddFieldsName + ' WHERE StageID = ' + CONVERT(VARCHAR(10),@Stage2ID) + ')
+								
+								select *, @totalfieldCount1, @TotalFieldCount2 from ' + @TempTableAddFieldsName + '
+							'
+						
+						EXECUTE sp_executesql 
+							  @SQL
+							, N'@TotalFieldCount1 INT OUTPUT
+							  , @TotalFieldCount2 INT OUTPUT'
+							, @TotalFieldCount1 = @TotalFieldCount1 OUTPUT
+							, @TotalFieldCount2 = @TotalFieldCount2 OUTPUT
+										
+						--Loop through all of the possible tables.
+						WHILE @CPIDCounter <= @CPIDCount
+							BEGIN
+								SET @SQL = 
+									'
+										SELECT
+											  @ProcID = ProcID 
+											, @ProviderID = ProviderID 
+											, @ClientParentID = ClientParentID
+											, @Stage1FullName = Stage1FullName 
+											, @Stage2FullName = Stage2FullName 
+											, @hdrckFullName = hdrckFullName
+											, @DTNFullName = DTNFullName 
+											, @Stage1DB = Stage1DB 
+											, @Stage1Table = Stage1Table 
+											, @Stage2DB = Stage2DB 
+											, @Stage2Table = Stage2Table 
+											, @hdrckTable = hdrckTable
+											, @DTNTable = DTNTable
+											, @SourceMetaDataID = SourceMetaDataID
+											, @DestinationMetaDataID1 = DestinationMetaDataID1
+											, @DestinationMetaDataID2 = DestinationMetaDataID2
+										FROM
+											' + @TempTableName + '
+										WHERE 
+											RowNum = @CPIDCounter	
+									'
+
+								EXECUTE sp_executesql 
+									  @SQL
+									, N'@ProcID BIGINT OUTPUT
+									  , @ProviderID BIGINT OUTPUT
+									  , @ClientParentID BIGINT OUTPUT
+									  , @Stage1FullName VARCHAR(MAX) OUTPUT
+									  , @Stage2FullName VARCHAR(MAX) OUTPUT
+									  , @hdrckFullName VARCHAR(MAX) OUTPUT
+									  , @DTNFullName VARCHAR(MAX) OUTPUT
+									  , @Stage1DB VARCHAR(MAX) OUTPUT
+									  , @Stage1Table VARCHAR(MAX) OUTPUT
+									  , @Stage2DB VARCHAR(MAX) OUTPUT
+									  , @Stage2Table VARCHAR(MAX) OUTPUT
+									  , @hdrckTable VARCHAR(MAX) OUTPUT
+									  , @DTNTable VARCHAR(MAX) OUTPUT
+									  , @SourceMetaDataID BIGINT OUTPUT
+									  , @DestinationMetaDataID1 BIGINT OUTPUT
+									  , @DestinationMetaDataID2 BIGINT OUTPUT
+									  , @CPIDCounter BIGINT'
+									, @ProcID = @ProcID OUTPUT
+									, @ProviderID = @ProviderID OUTPUT
+									, @ClientParentID = @ClientParentID OUTPUT
+									, @Stage1FullName = @Stage1FullName OUTPUT
+									, @Stage2FullName = @Stage2FullName OUTPUT
+									, @hdrckFullName = @hdrckFullName OUTPUT
+									, @DTNFullName = @DTNFullName OUTPUT
+									, @Stage1DB = @Stage1DB OUTPUT
+									, @Stage1Table = @Stage1Table OUTPUT
+									, @Stage2DB = @Stage2DB OUTPUT
+									, @Stage2Table = @Stage2Table OUTPUT
+									, @hdrckTable = @hdrckTable OUTPUT
+									, @DTNTable = @DTNTable OUTPUT
+									, @SourceMetaDataID = @SourceMetaDataID OUTPUT
+									, @DestinationMetaDataID1 = @DestinationMetaDataID1 OUTPUT
+									, @DestinationMetaDataID2 = @DestinationMetaDataID2 OUTPUT
+									, @CPIDCounter = @CPIDCounter
+						
+								--Check if field exists in tables/column definitions, add if it doesn't
+								--Build Stage 1
+								SET @Counter = 1
+
+								WHILE @Counter <= @TotalFieldCount1
+									BEGIN
+										SET @SQL = 
+											'
+												SET @ColName = (SELECT ColumnName FROM ' + @TempTableAddFieldsName + ' WHERE RowN = ' + CONVERT(VARCHAR(10),@Counter) + ')
+												SET @DataType = (SELECT DataType FROM ' + @TempTableAddFieldsName + ' WHERE RowN = ' + CONVERT(VARCHAR(10),@Counter) + ')
+											'
+
+										EXECUTE sp_executesql 
+											  @SQL
+											, N'@ColName VARCHAR(200) OUTPUT
+											  , @DataType VARCHAR(200) OUTPUT'
+											, @ColName = @ColName OUTPUT
+											, @DataType = @DataType OUTPUT
+						
+										--Insert into "Source" Metal Table
+										SET @SQL =
+											'
+												USE [' + @Stage1DB + ']
+								
+												IF EXISTS
+												(
+													SELECT 
+														1 
+													FROM 
+														[HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition] 
+													WHERE 
+														''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @ColName + ']''
+														AND SourceMetaDataID = ' + CONVERT(NVARCHAR(10), @SourceMetaDataID) + '
+												)
+													BEGIN
+														PRINT ''Source Column Definition: Column [' + @ColName + '] already exists.''
+													END
+												ELSE
+													BEGIN
+														INSERT INTO
+															[HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition]
+															(
+																  SourceMetaDataID
+																, ColumnName
+																, ColumnDataType
+																, ColumnWidth
+																, ColumnOrder
+																, ColumnTextQualifier
+																, ActiveFlag
+																, CreateDate
+																, FlexColumn
+															)
+														SELECT 
+																' + CONVERT(NVARCHAR(10), @SourceMetaDataID) + '
+															, ''[' + @ColName + ']''
+															, ''[DT_WSTR]''
+															, 4000
+															, ' + CONVERT(NVARCHAR(10),(SELECT MAX(ColumnOrder) FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceColumnDefinition] WHERE SourceMetaDataID = @SourceMetaDataID)+ 1) + '
+															, ''"''
+															, ' + CONVERT(NVARCHAR(3), @True) + '
+															, GETDATE()
+															, ' + CONVERT(NVARCHAR(3), @False) + '
+
+														PRINT ''Source Column Definition: Column [' + @ColName + '] added to SourceColumnDefinition table.''
+													END
+											'
+
+										--Insert Into "Stage 1" Metal Table
+										SET @SQL = @SQL + 
+											'
+												IF EXISTS
+												(
+													SELECT 
+														1 
+													FROM 
+														[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+													WHERE 
+														''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @ColName + ']''
+														AND DestinationMetaDataID = ' + CONVERT(NVARCHAR(10), @DestinationMetaDataID1) + '
+														AND DestinationStageID = ' + CONVERT(NVARCHAR(10), @Stage1ID) + '
+												)
+													BEGIN
+														PRINT ''Destination Column Definition Stage 1: Column [' + @ColName + '] already exists.''
+													END
+												ELSE
+													BEGIN
+														INSERT INTO
+															[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+															(
+																  DestinationMetaDataID
+																, ColumnName
+																, ColumnDataType
+																, ColumnOrder
+																, ColumnTextQualifier
+																, ActiveFlag
+																, CreateDate
+																, FileColumnOrder
+																, DestinationStageID
+															)
+														SELECT 
+															  ' + CONVERT(NVARCHAR(10), @DestinationMetaDataID1) + '
+															, ''[' + @ColName + ']''
+															, ''' + @DataType + '''
+															, ' + CONVERT(NVARCHAR(10),(SELECT MAX(ColumnOrder) FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] WHERE DestinationMetaDataID = @DestinationMetaDataID1)+ 1) + '
+															, ''"''
+															, ' + CONVERT(NVARCHAR(3), @True) + '
+															, GETDATE()
+															, ' + CONVERT(NVARCHAR(10),(SELECT MAX(FileColumnOrder) FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] WHERE DestinationMetaDataID = @DestinationMetaDataID1)+ 1) + '
+															, ' + CONVERT(NVARCHAR(3), @Stage1ID) + '
+
+														PRINT ''Destination Column Definition Stage 1: Column [' + @ColName + '] added to DestinationColumnDefinition table for Stage 1.''
+													END
+											'
+
+										--Alter Statements
+										SET @SQL = @SQL + 
+											'
+												IF OBJECT_ID(''' + @Stage1Table + ''', ''U'') IS NOT NULL
+													BEGIN
+														IF EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage1Table + '''
+																AND COLUMN_NAME = ''' + @ColName + '''
+														)
+															BEGIN
+																PRINT ''Stage 1 Table: Field [' + @ColName + '] already exists in Stage 1.''
+															END
+														ELSE
+															BEGIN
+																ALTER TABLE ' + @Stage1Table + '
+																ADD [' + @ColName + '] ' + @DataType + '
+
+																PRINT ''Stage 1 Table: Column [' + @ColName + '] added to [' + @Stage1Table + '] table.''
+															END
+													END
+												ELSE
+													BEGIN
+														PRINT ''Stage 1 Table: Table [' + @Stage1Table + '] does not exist.''
+													END
+
+												IF OBJECT_ID(''' + @hdrckTable + ''', ''U'') IS NOT NULL
+													BEGIN
+														IF EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @hdrckTable + '''
+																AND COLUMN_NAME = ''' + @ColName + '''
+														)
+															BEGIN
+																PRINT ''Hdrck Table: Field [' + @ColName + '] already exists in hdrck.''
+															END
+														ELSE
+															BEGIN
+																ALTER TABLE ' + @hdrckTable + '
+																ADD [' + @ColName + '] ' + @DataType + '
+
+																PRINT ''Hdrck Table: Column [' + @ColName + '] added to [' + @hdrckTable + '] table.''
+															END
+													END
+												ELSE
+													BEGIN
+														PRINT ''Hdrck Table: Table [' + @hdrckTable + '] does not exist.''
+													END
+											'
+ 
+										IF @DebugFlag = @False
+											BEGIN
+												EXEC (@SQL)
+											END
+										ELSE
+											BEGIN	
+												SELECT 'Add SQL', @SQL
+											END
+
+										SET @Counter = @Counter + 1
+									END
+
+								SET @SQL = 
+									'
+										SET @Counter2 = (SELECT MIN(RowN) FROM ' + @TempTableAddFieldsName + ' WHERE StageID = ' + CONVERT(VARCHAR(10),@Stage2ID) + ')
+									'
+
+								EXECUTE sp_executesql 
+									  @SQL
+									, N'@Counter2 INT OUTPUT'
+									, @Counter2 = @Counter2 OUTPUT
+								
+								--Build Stage 2
+								WHILE @Counter2 <= @TotalFieldCount2
+									BEGIN
+										SET @SQL = 
+										'
+											SET @ColName = (SELECT ColumnName FROM ' + @TempTableAddFieldsName + ' WHERE RowN = ' + CONVERT(VARCHAR(10),@Counter2) + ')
+											SET @DataType = (SELECT DataType FROM ' + @TempTableAddFieldsName + ' WHERE RowN = ' + CONVERT(VARCHAR(10),@Counter2) + ')
+										'
+
+										EXECUTE sp_executesql 
+											  @SQL
+											, N'@ColName VARCHAR(200) OUTPUT
+											  , @DataType VARCHAR(200) OUTPUT'
+											, @ColName = @ColName OUTPUT
+											, @DataType = @DataType OUTPUT
+						
+										--Insert into "Stage 2" Metal Table
+										SET @SQL =
+											'
+												USE [' + @Stage1DB + ']
+								
+												IF EXISTS
+												(
+													SELECT 
+														1 
+													FROM 
+														[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] 
+													WHERE 
+														''['' + REPLACE(REPLACE(ColumnName,'']'',''' + @EmptyString + '''),''['',''' + @EmptyString + ''') + '']'' = ''[' + @ColName + ']''
+														AND DestinationMetaDataID = ' + CONVERT(NVARCHAR(10), @DestinationMetaDataID2) + '
+														AND DestinationStageID = ' + CONVERT(NVARCHAR(10), @Stage2ID) + '
+												)
+													BEGIN
+														PRINT ''Destination Column Definition Stage 2: Column [' + @ColName + '] already exists.''
+													END
+												ELSE
+													BEGIN
+														INSERT INTO
+															[HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition]
+															(
+																	DestinationMetaDataID
+																, ColumnName
+																, ColumnDataType
+																, ColumnOrder
+																, ActiveFlag
+																, CreateDate
+																, DestinationStageID
+															)
+														SELECT 
+																' + CONVERT(NVARCHAR(10), @DestinationMetaDataID2) + '
+															, ''[' + @ColName + ']''
+															, ''' + @DataType + '''
+															, ' + CONVERT(NVARCHAR(10),(SELECT MAX(ColumnOrder) FROM [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] WHERE DestinationMetaDataID = @DestinationMetaDataID2)+ 1) + '
+															, ' + CONVERT(NVARCHAR(3), @True) + '
+															, GETDATE()
+															, ' + CONVERT(NVARCHAR(3), @Stage2ID) + '
+
+														PRINT ''Destination Column Definition Stage 2: Column [' + @ColName + '] added to DestinationColumnDefinition table for Stage 2.''
+													END
+											'
+
+										--Alter Statements
+										SET @SQL = @SQL + 
+											'
+												IF OBJECT_ID(''' + @DTNTable + ''', ''U'') IS NOT NULL
+													BEGIN
+														IF EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @DTNTable + '''
+																AND COLUMN_NAME = ''' + @ColName + '''
+														)
+															BEGIN
+																PRINT ''DTN Table: Field [' + @ColName + '] already exists in DTN table.''
+															END
+														ELSE
+															BEGIN
+																ALTER TABLE ' + @DTNTable + '
+																ADD [' + @ColName + '] ' + @DataType + '
+
+																PRINT ''DTN Table: Column [' + @ColName + '] added to [' + @DTNTable + '] table.''
+															END
+													END
+												ELSE
+													BEGIN
+														PRINT ''DTN Table: Table [' + @Stage1Table + '] does not exist.''
+													END
+
+												IF OBJECT_ID(''' + @Stage2FullName + ''', ''U'') IS NOT NULL
+													BEGIN
+														IF EXISTS
+														(
+															SELECT 
+																1
+															FROM
+																' + @Stage2DB + '.INFORMATION_SCHEMA.COLUMNS
+															WHERE 
+																	TABLE_NAME = ''' + @Stage2Table + '''
+																AND COLUMN_NAME = ''' + @ColName + '''
+														)
+															BEGIN
+																PRINT ''Stage 2 Table: Field [' + @ColName + '] already exists in Stage 2 table.''
+															END
+														ELSE
+															BEGIN
+																ALTER TABLE ' + @Stage2FullName + '
+																ADD [' + @ColName + '] ' + @DataType + '
+
+																PRINT ''Stage 2 Table: Column [' + @ColName + '] added to [' + @Stage2Table + '] table.''
+															END
+													END
+												ELSE
+													BEGIN
+														PRINT ''Stage 2 Table: Table [' + @Stage2Table + '] does not exist.''
+													END
+											'
+ 
+										IF @DebugFlag = @False
+											BEGIN
+												EXEC (@SQL)
+											END
+										ELSE
+											BEGIN	
+												SELECT 'Add SQL', @SQL
+											END
+
+										SET @Counter2 = @Counter2 + 1
+									END
+
+								SET @CPIDCounter = @CPIDCounter + 1
+							END
+                    --Modify Source To Destination Mapping
+            SET @SQL =
+							'
+							    USE [MetalAdmin]
+
+                               DELETE FROM [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap] where processorID = ' + CONVERT(NVARCHAR(10), @ProcID) + '
+								
+                               INSERT INTO 
+		                            [HQDMOSQL04].[MetalAdmin].[dbo].[SourceToDestinationMap]
+			                            (
+				                             [SourceMetaID]
+				                            ,[SourceColumnID]
+				                            ,[DestinationMetaID]
+				                            ,[DestinationColumnID]
+				                            ,[TransformationCode]
+				                            ,[DestinationStageID]
+				                            ,[SpecialCode]
+				                            ,[ProcessorID]
+				                            ,[ColumnNo]
+			                            )               
+                    
+										SELECT                                                             
+		                                 cdc.DestinationMetaDataID
+		                                ,cdc.ID
+		                                ,dcd.DestinationMetaDataID
+		                                ,dcd.ID
+		                                ,null
+		                                ,' + CONVERT(NVARCHAR(10), @Stage2ID) + '
+		                                ,''DTN''
+		                                ,' + CONVERT(NVARCHAR(10), @ProcID) + '                                                       
+		                                ,cdc.ColumnOrder 
+                                
+                                        FROM                                                       
+		                                        [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] cdc                                                            
+			                                        RIGHT OUTER JOIN [HQDMOSQL04].[MetalAdmin].[dbo].[DestinationColumnDefinition] dcd 
+				
+                                                        ON dcd.ColumnName=case when ClientDB_Generic.dbo.udf_ColumnNameReplaceAWB (cdc.ColumnName) = ''[AdvertiserID]'' then ''[ProviderAdvertiserID]''   
+                                                                                                            else 
+                                                                                                            ClientDB_Generic.dbo.udf_ColumnNameReplaceAWB (cdc.ColumnName)   
+                                                                                                            end      
+                                        WHERE 
+		                                            cdc.DestinationMetaDataID = ' + CONVERT(NVARCHAR(10), @DestinationMetaDataID1) + ' --old destination
+		                                        AND dcd.DestinationMetaDataID = ' + CONVERT(NVARCHAR(10), @DestinationMetaDataID2) + ' --new destination 
+        
+                                                
+                                        ORDER BY 
+		                                        cdc.ColumnOrder                  
+							'
+                        IF @DebugFlag = @False
+						BEGIN
+							EXEC (@SQL)
+						END
+					ELSE
+						BEGIN	
+							SELECT 'Mapping SQL', @SQL
+						END
+					END
+				ELSE
+					BEGIN
+						SELECT 'DO NOT ADD.'
+					END
+			END
+	END
+
+	
